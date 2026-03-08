@@ -1,0 +1,13 @@
+# BToM-Data-Modeling-Python
+Post-research after the following paper named 'Rational quantitative attribution of beliefs, desires and percepts in human mentalizing'
+
+To implement the experiment, copy and paste the syntax below into the terminal.
+>>> python main_experiment.py --model gpt-4o --condition oneshot --mode normal --subjects 16
+
+To process the data,
+>>> python src/data_processor.py --ref_only --model truebelief --beta 9.0
+>>> python src/data_processor.py --model gpt-4o --condition vanilla --mode normal
+
+To analyze,
+>>> python run_analysis.py --model btom --baseline human --type scatter
+>>> python run_analysis.py --model gpt-4o --baseline btom --condition reasoning --mode normal --type rsa
