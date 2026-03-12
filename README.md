@@ -75,6 +75,7 @@ BToM_LLM
 
 ### Arguments Reference
 - To process the data,
+
 | Argument | Description | Available Options |
 | :--- | :--- | :--- |
 | `--model` | Target model for data processing | `human`, `btom`, `truebelief`, `gpt-4o`, etc. |
@@ -84,6 +85,7 @@ BToM_LLM
 | `--beta` | Target beta score of btom | 2.5(default) |
 
 - To run the experiments,
+
 | Argument | Description | Available Options |
 | :--- | :--- | :--- |
 | `--model` | Target model for experiment | `human`, `btom`, `gpt-4o`, `gemini-2.5-flash`, etc. |
@@ -92,6 +94,7 @@ BToM_LLM
 | `--subjects` | Number of virtual subjects | 16(default) |
 
 - To run the analyses,
+
 | Argument | Description | Available Options |
 | :--- | :--- | :--- |
 | `--model` | Target model for analysis | `human`, `btom`, `gpt-4o`, `gemini-2.5-flash`, etc. |
