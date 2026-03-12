@@ -73,6 +73,7 @@ BToM_LLM
 |   |--...
 ```
 
+
 ### Arguments Reference
 - To process the data,
 
@@ -103,6 +104,7 @@ BToM_LLM
 | `--mode` | Experiment option | `normal`(default), `everystep` |
 | `--type` | Type of plot to generate | `all`(default), `bar`, `scatter`, `rmse`, `rsa`, `phase` |
 
+
 ### Execution Example
 - You can use the preprocessed .pkl data, but to process from the original .mat (human, btom) or .csv (models) to .pkl, enter:
 ```bash
@@ -111,12 +113,12 @@ python src/data_processor.py --ref_only --model truebelief --beta 9.0
 python src/data_processor.py --model gpt-4o --condition vanilla --mode normal
 ```
 
-To run the experiments, enter:
+- To run the experiments, enter:
 ```bash
 python main_experiment.py --model gpt-4o --condition oneshot --mode normal --subjects 16
 ```
 
-To run the analyses, enter:
+- To run the analyses, enter:
 ```bash
 # if the target model is reference data (human, btom, truebelief, nocost, motionheuristic), you don't need condition and mode
 python run_analysis.py --model btom --baseline human --type scatter
@@ -124,4 +126,4 @@ python run_analysis.py --model gpt-4o --baseline btom --condition reasoning --mo
 ```
 
 ## 5. Results (In Progress)
-- refer to the plot images in /results
+- Please refer to the plot images in /results
