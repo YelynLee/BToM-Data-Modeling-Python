@@ -1,0 +1,17 @@
+# API & Environment
+anthropic
+openai
+python-dotenv
+
+# Utils
+tqdm
+
+# Data Science & Modeling
+numpy
+pandas
+scipy
+scikit-learn
+
+# Visualization
+matplotlib
+seaborn

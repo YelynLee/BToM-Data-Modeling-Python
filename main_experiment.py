@@ -118,7 +118,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="gpt-4o, o1-preview, gemini-2.5-flash etc.")
-    parser.add_argument("--condition", type=str, default="reasoning", choices=["vanilla", "reasoning", "oneshot"], help="Experiment condition")
+    parser.add_argument("--condition", type=str, default="vanilla", choices=["vanilla", "reasoning", "oneshot"], help="Experiment condition")
     parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep"], help="Experiment option")
     parser.add_argument("--subjects", type=int, default=16, help="Number of virtual subjects")
     

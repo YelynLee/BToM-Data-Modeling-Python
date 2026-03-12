@@ -5,7 +5,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
-import seaborn as sns
 from src.prepare_everystep import load_btom_everystep
 
 # 1. 현재 스크립트(analysis 폴더)의 상위 경로를 파이썬 탐색 경로에 추가
@@ -134,27 +133,6 @@ def plot_score_figure(df_data, df_btom_data, score_type, title_prefix, cols, col
         
         # Group 및 Phase 별 '추세 일치율(Match Rate)' 집계 (0 ~ 1.0)
         trend_match_rates = merged.groupby(['group_id', 'phase'])['trend_match'].mean().reset_index()
-
-    # # 🌟 [오차 계산 로직 추가] BToM과 LLM의 값을 병합하여 오차 계산
-    # phase_errors = None
-    # if df_btom_data is not None:
-    #     btom_cols = ['scenario_id', 'time_step', 'group_id', 'phase'] + cols
-    #     merged = pd.merge(df_data, df_btom_data[btom_cols], on=['scenario_id', 'time_step', 'group_id', 'phase'], suffixes=('', '_btom'))
-        
-    #     # MAE(Mean Absolute Error) 계산
-    #     diffs = []
-    #     for col in cols:
-    #         diffs.append(np.abs(merged[col] - merged[col + '_btom']))
-    #     merged['mae'] = np.mean(diffs, axis=0)
-        
-    #     # Group 및 Phase 별 평균 오차 집계
-    #     phase_errors = merged.groupby(['group_id', 'phase'])['mae'].mean().reset_index()
-
-    # # 오차 기준값(Threshold) 설정
-    # if score_type == "Desire":
-    #     good_th, bad_th = 0.8, 2.0  # 1~7 척도 기준
-    # else:
-    #     good_th, bad_th = 0.15, 0.35 # 0~1 척도 기준
 
     # truck_presence에 따른 선 모양 매핑 (데이터 내 실제 텍스트에 맞춰 키값을 수정하세요!)
     presence_styles = {
