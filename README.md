@@ -1,22 +1,21 @@
 # BToM-Data-Modeling-Python
 Post-research after the following paper [Rational quantitative attribution of beliefs, desires and percepts in human mentalizing](https://www.nature.com/articles/s41562-017-0064)
 
+
 ## 1. Project Overview
-- Objective: Building an automated pipeline and golden dataset for validating LLM's Theory of Mind (ToM) capabilities
+- Objective: <br>Building an automated pipeline and golden dataset of food truck task for verifying LLM's Theory of Mind (ToM) capabilities
 - Key Points:
-   - Schema Flattening:
-      Unnested MATLAB cell arrays and structs into a 2D tabular format
-   - Integrity:
-      Integrated QA routines to validate the data across the pipeline
-   - Robust Pipeline:
-      Designed dynamic execution paths using quality thresholds
-   - Semantic Labeling:
-      Applied BFS algorithm to assign semantic phase labels to coordinates
+   - **Schema Flattening**: <br>Unnested MATLAB cell arrays and structs into a 2D tabular format
+   - **Integrity**: <br>Integrated QA routines to validate the data across the pipeline
+   - **Robust Pipeline**: <br>Designed dynamic execution paths using quality thresholds
+   - **Semantic Labeling**: <br>Applied BFS algorithm to assign semantic phase labels to coordinates
+
 
 ## 2. System Requirements
 - OS: Tested on Windows
 - Language: Python 3.12
 - Dependencies: refer to 'requirements.txt'
+
 
 ## 3. Installation Guide
 1. Clone the repository
@@ -27,6 +26,7 @@ Post-research after the following paper [Rational quantitative attribution of be
 ```bash
    pip install -r requirements.txt
 ``` 
+
 
 ## 4. Instructions for Use
 
@@ -85,6 +85,7 @@ BToM_LLM
 | `--ref_only` | Convert reference data (MAT)  | this is needed for human, btom, truebelief, nocost, motionheuristic |
 | `--beta` | Target beta score of btom | 2.5(default) |
 
+
 - To run the experiments,
 
 | Argument | Description | Available Options |
@@ -93,6 +94,7 @@ BToM_LLM
 | `--condition` | Experiment condition | `vanilla`(default), `reasoning`, `oneshot` |
 | `--mode` | Experiment option | `normal`(default), `everystep` |
 | `--subjects` | Number of virtual subjects | 16(default) |
+
 
 - To run the analyses,
 
@@ -113,10 +115,12 @@ python src/data_processor.py --ref_only --model truebelief --beta 9.0
 python src/data_processor.py --model gpt-4o --condition vanilla --mode normal
 ```
 
+
 - To run the experiments, enter:
 ```bash
 python main_experiment.py --model gpt-4o --condition oneshot --mode normal --subjects 16
 ```
+
 
 - To run the analyses, enter:
 ```bash
@@ -124,6 +128,7 @@ python main_experiment.py --model gpt-4o --condition oneshot --mode normal --sub
 python run_analysis.py --model btom --baseline human --type scatter
 python run_analysis.py --model gpt-4o --baseline btom --condition reasoning --mode normal --type rsa
 ```
+
 
 ## 5. Results (In Progress)
 - Please refer to the plot images in /results
