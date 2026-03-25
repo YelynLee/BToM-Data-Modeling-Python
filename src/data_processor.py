@@ -5,8 +5,8 @@ import pickle
 import numpy as np
 import pandas as pd
 import scipy.io
-from src.config import get_group_indices, HUMAN_MAT_PATH, HUMAN_PKL_PATH, REFERENCE_MAT_PATH, REFERENCE_PKL_DIR, BASE_RESULTS_DIR
-from src.utils import inspect_pickle_data
+from config import get_group_indices, HUMAN_MAT_PATH, HUMAN_PKL_PATH, REFERENCE_MAT_PATH, REFERENCE_PKL_DIR, BASE_RESULTS_DIR
+from utils import inspect_pickle_data
 
 # =============================================================================
 # 1. Human Data Processing (MAT -> PKL)
@@ -234,18 +234,32 @@ def process_model_results(target_dir, mode='normal'):
                 bel_inf[1, sc_idx, subj_idx] = row_final['belief_M']
                 bel_inf[2, sc_idx, subj_idx] = row_final['belief_Empty']
 
+    # -------------------------------------------------------------------------
+    # 🌟 [추가] Raw Data의 결측치(NaN) 현황 터미널 출력
+    # -------------------------------------------------------------------------
+    nan_count_des = np.isnan(des_inf).sum()
+    nan_count_bel = np.isnan(bel_inf).sum()
+    total_cells = des_inf.size
+    print(f"📊 [Diagnostics] 결측치 현황:")
+    print(f"   - Desire 결측치: {nan_count_des}건 (전체 {total_cells}개 중)")
+    print(f"   - Belief 결측치: {nan_count_bel}건 (전체 {total_cells}개 중)")
+    # -------------------------------------------------------------------------
+
     # 4. 통계 계산 (Mean, SE, Norm)
     # shape: (Rating, Condition) -> subject을 모두 합쳤으므로
     des_inf_mean = np.nanmean(des_inf, axis=2)
     bel_inf_mean = np.nanmean(bel_inf, axis=2)
 
-    # Normalize Belief
-    # Human data처럼 각 시나리오별 합이 1이 되도록 정규화 (선택 사항이나 비교를 위해 수행)
+    # Normalize Belief (🌟 1~7점 척도를 0~6점으로 보정하여 확률 분포화)
+    # Human data의 원본 MATLAB 로직과 완벽히 동일한 수학적 처리
+    bel_inf_mean_shifted = bel_inf_mean - 1
+    bel_inf_mean_shifted = np.maximum(bel_inf_mean_shifted, 0) # 혹시 모를 음수(0 미만) 방지
+    
     # 모델은 1~7 척도이므로, 합계로 나누어 확률 분포처럼 만듦
-    bel_sum = np.nansum(bel_inf_mean, axis=0) # (78,)
+    bel_sum = np.nansum(bel_inf_mean_shifted, axis=0) # (78,)
     # 0으로 나누기 방지
     bel_sum[bel_sum == 0] = 1.0 
-    bel_inf_mean_norm = bel_inf_mean / bel_sum[np.newaxis, :]
+    bel_inf_mean_norm = bel_inf_mean_shifted / bel_sum[np.newaxis, :]
 
     # Standard Error
     # Count valid (non-NaN) subjects per condition

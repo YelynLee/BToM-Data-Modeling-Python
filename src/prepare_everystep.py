@@ -5,11 +5,11 @@ import numpy as np
 import pandas as pd
 from collections import deque
 import scipy.io
-from src.dataset import df_btom
-from src.config import BASE_RESULTS_DIR, get_group_indices, BTOM_EVERY_MAT_PATH
+from dataset import df_btom
+from config import BASE_RESULTS_DIR, BEHAVIOR_GROUPS, get_group_indices, BTOM_EVERY_MAT_PATH
 
 # =========================================================================
-# 0. 벽을 우회하는 실제 최단 경로(BFS) 계산 헬퍼 함수
+# 1. 벽을 우회하는 실제 최단 경로(BFS) 계산 헬퍼 함수
 # =========================================================================
 def get_true_distance(start_x, start_y, target_x, target_y, wx, wy, ww, wh):
     """
@@ -54,7 +54,7 @@ def get_true_distance(start_x, start_y, target_x, target_y, wx, wy, ww, wh):
     return float('inf')
 
 # =========================================================================
-# 1. Phase Labeling (수학적 판별 로직)
+# 2. Phase Labeling (수학적 판별 로직)
 # =========================================================================
 def apply_phase_labeling(df):
     """
@@ -152,7 +152,7 @@ def apply_phase_labeling(df):
             df.loc[base_mask & (ts_col >= ts_leave_G1) & (ts_col < ts_vis_G2), 'phase'] = "Pass G1"
 
             if ts_vis_G2 != float('inf'):
-                df.loc[base_mask & (ts_col == ts_vis_G2), 'phase'] = "See & Approach G2"
+                df.loc[base_mask & (ts_col == ts_vis_G2), 'phase'] = "See G2"
                 df.loc[base_mask & (ts_col > ts_vis_G2) & (ts_col <= ts_peak_G2_first), 'phase'] = "Approach G2"
             else:
                 df.loc[base_mask & (ts_col >= ts_leave_G1) & (ts_col <= ts_peak_G2_first), 'phase'] = "Approach G2"
@@ -165,7 +165,7 @@ def apply_phase_labeling(df):
             df.loc[base_mask & (ts_col >= ts_leave_G1) & (ts_col < ts_vis_G2), 'phase'] = "Pass G1"
             
             if ts_vis_G2 != float('inf'):
-                df.loc[base_mask & (ts_col >= ts_vis_G2) & (ts_col <= ts_peak_G2_last), 'phase'] = "See & Reject G2"
+                df.loc[base_mask & (ts_col >= ts_vis_G2) & (ts_col <= ts_peak_G2_last), 'phase'] = "See G2"
             
             df.loc[base_mask & (ts_col > ts_peak_G2_last), 'phase'] = "Return G1"
             
@@ -217,7 +217,7 @@ def apply_phase_labeling(df):
     return df
 
 # =========================================================================
-# 1.5 데이터 정합성 검토 및 '유효한 시나리오' 추출 (Valid Subset Extraction)
+# 3. 데이터 정합성 검토 및 '유효한 시나리오' 추출 (Valid Subset Extraction)
 # =========================================================================
 def get_valid_scenarios(model_name, condition):
     """
@@ -355,7 +355,7 @@ def get_valid_scenarios(model_name, condition):
     return final_valid_keys, selected_subjects
 
 # =========================================================================
-# 2. Master DataFrame 생성 로직
+# 4. Master DataFrame 생성 로직
 # =========================================================================
 def build_master_dataframe(model_name, condition, valid_keys):
     """
@@ -424,21 +424,8 @@ def build_master_dataframe(model_name, condition, valid_keys):
     
     return df_master
 
-# 외부(run_analysis.py)에서 호출하기 위한 메인 래퍼 함수
-def run_prepare_everystep(model_name, condition):
-    print("\n" + "="*60)
-    print("🚀 [Everystep] Valid-only DataFrame Builder Started")
-    print("="*60)
-    
-    valid_keys, selected_subjects = get_valid_scenarios(model_name, condition)
-    
-    if valid_keys:
-        build_master_dataframe(model_name, condition, valid_keys)
-        
-    return selected_subjects # 이 명단을 run_analysis로 전달!
-
 # =========================================================================
-# 3. BToM Everystep 데이터 로드 함수
+# 5. BToM Everystep 데이터 로드 함수
 # =========================================================================
 def load_btom_everystep(mat_path=BTOM_EVERY_MAT_PATH):
     """
@@ -493,10 +480,41 @@ def load_btom_everystep(mat_path=BTOM_EVERY_MAT_PATH):
     
     return df_merged
 
+# =========================================================================
+# 메인 실행 래퍼 함수 (run_analysis.py에서 호출)
+# =========================================================================
+def run_prepare_everystep(model_name, condition):
+    print("\n" + "="*60)
+    print("🚀 [Everystep] Valid-only DataFrame Builder Started")
+    print("="*60)
+    
+    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
+    output_path = os.path.join(target_dir, "everystep_valid_only.csv")
+    
+    # 🌟 [NEW] 이미 파일이 존재하면 무거운 연산(BFS, 병합) 스킵
+    if os.path.exists(output_path):
+        print(f"⏩ [Skip] '{output_path}' 이미 존재합니다. 데이터 구축을 건너뜁니다.")
+        
+        # 시각화(plot_everystep.py)로 전달할 우등생 명단을 추출하기 위해 가볍게 로드
+        df_master = pd.read_csv(output_path)
+        selected_subjects = sorted(df_master['subject_id'].unique().tolist())
+        
+        return selected_subjects
+
+    # ---------------------------------------------------------------------
+    # 기존 데이터 구축 로직 (파일이 없을 때만 실행)
+    # ---------------------------------------------------------------------
+    valid_keys, selected_subjects = get_valid_scenarios(model_name, condition)
+    
+    if valid_keys:
+        df_master = build_master_dataframe(model_name, condition, valid_keys)
+
+    return selected_subjects # 이 명단을 run_analysis로 전달!
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True, help="Model name (e.g., gpt-4o)")
-    parser.add_argument("--condition", type=str, required=True, help="Condition (e.g., oneshot, reasoning)")
+    parser.add_argument("--condition", type=str, required=True, help="Condition (e.g., vanilla, reasoning, oneshot)")
     args = parser.parse_args()
 
     run_prepare_everystep(args.model, args.condition)

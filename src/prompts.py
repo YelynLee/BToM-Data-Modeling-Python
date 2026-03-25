@@ -1,3 +1,5 @@
+from src.dataset import df_btom
+
 SYSTEM_PROMPT_BASE = """
 You are a participant in a psychology experiment designed to infer intentions from behavior.
 Please make judgments based strictly on the provided setting descriptions.
@@ -11,7 +13,7 @@ Please make judgments based strictly on the provided setting descriptions.
 The logs provided represent the decision-making process of different students on different days as they move around the campus to decide where to have lunch.
 
 [Output Format]
-Please provide the response in JSON format Do not include any markdown formatting like ```json.
+Please provide the response in JSON format. Do not include any markdown formatting like ```json.
 """
 
 SYSTEM_PROMPT_EVERY = """
@@ -32,125 +34,106 @@ The logs provided represent the decision-making process of different students on
 2. NO Look-ahead: When analyzing Time Step 't', you must NOT use any information from future steps (t+1, t+2...). 
    - Pretend you are watching a live video feed and do not know the ending.
 3. Update: Update the estimates ONLY based on the accumulated evidence up to the current step.
-4. Consistency: If no new information is gained at a step, maintain the previous estimate.
+4. YES Look-back: When you're doing the 'belief analysis', you must retrospectively consider the agent's initial belief at "time_step": 1.
 5. NO LAZINESS (CRITICAL): You must output data for EVERY SINGLE time step present in the log. Do NOT skip, abbreviate, or use placeholders like "...".
 
 [Output Format]
-Please provide the response in JSON format strictly.
+Please provide the response in JSON format. Do not include any markdown formatting like ```json.
 """
 
-# 일단은 Check-Goback 조건의 예시 하나
-# 이후로는 그룹을 달리하거나, 개수를 늘리는 등 조작이 필요
+# ver 3/16: Check-Goback 중 실제 예시(일단 모델 상관없이 scenario 1번) & subject/btom 1번 피험자 응답을 가져옴
+# 외에도 그룹을 달리하거나, 개수를 늘리는 등 조작이 필요
 ONE_SHOT_EXAMPLE = """
 [Reference Example: How to analyze the Log]
-To help you understand, here is an example of how a human observer analyzes a scenario.
+To help you understand, here is an example of how a human observer scored a scenario.
 
 [Map Configuration]
-- Spot 1 (Visible): Truck K
-- Spot 2 (Occluded): Truck L
-- Note: Truck M is NOT present in this map.
+- Parking Spot 1: Located at (1, 1)
+- Parking Spot 2: Located at (15, 5)
+- Obstacle (Building): Starts at (2, 3) with size 13x1
 
 [Chronological Log]
-Time Step 1-2: Agent moves towards Spot 1 (Visible: K)
-Time Step 3: Agent moves past Spot 1 (Visible: K) 
-Time Step 4-5: Moves towards occluded Spot 2
-Time Step 6: Agent arrives at Spot 2 (Visible: L)
-Time Step 7: Agent moves past Spot 2 (Visible: L) 
-Time Step 8-9: Agent moves towards to Spot 1
-Time Step 10: Agent arrives at Spot 1 (Visible: K)
-
-[Reasoning Logic]
-1. Desire Analysis:
-   - At Step 3, the agent ignored the visible Truck K, implying he/she hoped for a better option (L or M) in the blind spot.
-   - At Step 7, he/she saw Truck L but rejected it.
-   - At Step 10, he/she returned to K. This confirms preference order: M (hoped for) > K (settled for) > L (rejected).
-
-2. Belief Analysis:
-   - At Step 3, the agent walked away from a visible K. This action assumes an initial belief that his/her favorite truck (L or M) was in the occluded spot 2.
-   - At Step 7, it can be assumed that he/she anticipated M but not L in the occluded spot 2 at t=1.
-   - At Step 10, the initial belief that M would be in the occluded spot 2 is assumed to be the same.
+Time Step 1: Agent at (2, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 2: Agent at (1, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 3: Agent at (1, 3) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 4: Agent at (1, 4) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is Visible (Observed: Truck L)
+Time Step 5: Agent at (1, 4) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is Visible (Observed: Truck L)
+Time Step 6: Agent at (1, 3) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 7: Agent at (1, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 8: Agent at (1, 1) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
 
 [Example JSON Output]
 {
-  "desire_reasoning": "Passing visible K implies hope for L or M. Rejecting L to return to K confirms M > K > L.",
-  "desire_scores": { "K": 5, "M": 7, "L": 2 },
-  "belief_reasoning": "Ignoring visible K and rejecting L strongly suggests a high belief at t=1 that truck M is hidden at spot 2.",
-  "belief_scores": { "time_step": 1, "M": 7, "L": 2, "Empty": 1 }
+  "desire_scores": { "K": 4, "L": 3, "M": 6 },
+  "belief_scores": { "time_step": 1, "L": 4, "M": 6, "Empty": 4 }
 }
 """
 
 ONE_SHOT_EXAMPLE_EVERY = """
 [Reference Example: How to analyze the Log]
-To help you understand, here is an example of how a human observer analyzes a scenario.
+To help you understand, here is an example of how a human observer scored a scenario.
 
 [Map Configuration]
-- Spot 1 (Visible): Truck K
-- Spot 2 (Occluded): Truck L
-- Note: Truck M is NOT present in this map.
+- Parking Spot 1: Located at (1, 1)
+- Parking Spot 2: Located at (15, 5)
+- Obstacle (Building): Starts at (2, 3) with size 13x1
 
 [Chronological Log]
-Time Step 1-2: Agent moves towards Spot 1 (Visible: K)
-Time Step 3: Agent moves past Spot 1 (Visible: K) 
-Time Step 4-5: Moves towards occluded Spot 2
-Time Step 6: Agent arrives at Spot 2 (Visible: L)
-Time Step 7: Agent moves past Spot 2 (Visible: L) 
-Time Step 8-9: Agent moves towards to Spot 1
-Time Step 10: Agent arrives at Spot 1 (Visible: K)
-
-[Reasoning Logic]
-1. Desire Analysis:
-   - At Step 3, the agent ignored the visible Truck K, implying he/she hoped for a better option (L or M) in the blind spot.
-   - At Step 7, he/she saw Truck L but rejected it.
-   - At Step 10, he/she returned to K. This confirms preference order: M (hoped for) > K (settled for) > L (rejected).
-
-2. Belief Analysis:
-   - At Step 3, the agent walked away from a visible K. This action assumes an initial belief that his/her favorite truck (L or M) was in the occluded spot 2.
-   - At Step 7, it can be assumed that he/she anticipated M but not L in the occluded spot 2 at t=1.
-   - At Step 10, the initial belief that M would be in the occluded spot 2 is assumed to be the same.
+Time Step 1: Agent at (2, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 2: Agent at (1, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 3: Agent at (1, 3) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 4: Agent at (1, 4) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is Visible (Observed: Truck L)
+Time Step 5: Agent at (1, 4) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is Visible (Observed: Truck L)
+Time Step 6: Agent at (1, 3) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 7: Agent at (1, 2) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
+Time Step 8: Agent at (1, 1) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is NOT Visible (Occluded)
    
 [Example JSON Output]
 [
   {
     "time_step": 1,
-    "desire_reasoning": "No action has been taken. No strong inference on desire can be made yet.",
-    "desire_scores": { "K": 4, "M": 4, "L": 4 },
-    "belief_reasoning": "At t=1, K is visible while others are invisible. No action has been taken to infer belief yet.",
-    "belief_scores": { "M": 4, "L": 4, "Empty": 4 }
+    "desire_scores": { "K": 4, "L": 4, "M": 4 },
+    "belief_scores": { "L": 4, "M": 4, "Empty": 4 }
   },
   {
     "time_step": 2,
-    "desire_reasoning": "Moving towards Spot 1. It may show preference on K, but no strong inference can be made yet.",
-    "desire_scores": { "K": 6, "M": 4, "L": 4 },
-    "belief_reasoning": "At t=1, K was visible while others were invisible. No enough evidence to infer belief on the occluded spot.",
-    "belief_scores": { "M": 4, "L": 4, "Empty": 4 }
+    "desire_scores": { "K": 4, "L": 4, "M": 4 },
+    "belief_scores": { "L": 4, "M": 4, "Empty": 4 }
   },
   {
     "time_step": 3,
-    "desire_reasoning": "Passed visible K to check the occluded spot. Missing truck L or M is likely preferred over K.",
-    "desire_scores": { "K": 3, "M": 6, "L": 6 },
-    "belief_reasoning": "At t=1, K was visible while others were invisible. Moving past K suggests expecting L or M.",
-    "belief_scores": { "M": 6, "L": 6, "Empty": 1 }
+    "desire_scores": { "K": 2, "L": 4, "M": 4 },
+    "belief_scores": { "L": 5, "M": 5, "Empty": 4 }
   },
-  "... (Include an object for EVERY time step 4, 5, 6 following the same structure) ...",
+  {
+    "time_step": 4,
+    "desire_scores": { "K": 2, "L": 4, "M": 4 },
+    "belief_scores": { "L": 5, "M": 5, "Empty": 3 }
+  },
+  {
+    "time_step": 5,
+    "desire_scores": { "K": 2, "L": 3, "M": 5 },
+    "belief_scores": { "L": 4, "M": 6, "Empty": 3 }
+  },
+  {
+    "time_step": 6,
+    "desire_scores": { "K": 3, "L": 2, "M": 6 },
+    "belief_scores": { "L": 3, "M": 6, "Empty": 3 }
+  },
   {
     "time_step": 7,
-    "desire_reasoning": "Spot 2 became visible, showing L. Passing K earlier and now rejecting L implies the missing M is the most preferred.",
-    "desire_scores": { "K": 5, "M": 7, "L": 2 },
-    "belief_reasoning": "K was initially visible, others occluded. Continuing past K and rejecting L strongly implies intial expectation of missing M.",
-    "belief_scores": { "M": 7, "L": 2, "Empty": 1 }
+    "desire_scores": { "K": 3, "L": 2, "M": 6 },
+    "belief_scores": { "L": 2, "M": 6, "Empty": 2 }
   },
-  "... (Include an object for EVERY time step 8, 9 following the same structure) ...",
   {
-    "time_step": 10,
-    "desire_reasoning": "Spot 2 was checked. Returning to K after rejecting L implies missing M was desired, but K is preferred over L.",
-    "desire_scores": { "K": 5, "M": 7, "L": 2 },
-    "belief_reasoning": "K was visible, L and M occluded at t=1. Leaving K and rejecting L meant hoping for missing M at spot 2.",
-    "belief_scores": { "M": 7, "L": 2, "Empty": 1 }
+    "time_step": 8,
+    "desire_scores": { "K": 4, "L": 2, "M": 6 },
+    "belief_scores": { "L": 2, "M": 6, "Empty": 2 }
   }
 ]
 """
 
-def generate_scenario_prompt(df_scenario, condition='reasoning', mode='normal'):
+def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
     """
     Args:
         df_scenario: 시나리오 데이터프레임
@@ -215,17 +198,17 @@ def generate_scenario_prompt(df_scenario, condition='reasoning', mode='normal'):
 
     # --- 질문 목록 동적 생성 ---
     # 기본 옵션
-    belief_options = ["K", "M", "L", "Empty"]
+    belief_options = ["K", "L", "M", "Empty"]
     
     # t=1에 이미 보인 트럭은 옵션에서 제거
     if visible_truck_at_t1 in belief_options:
         belief_options.remove(visible_truck_at_t1)
     
-    # 프롬프트에 넣을 문자열 생성 (예: "M, L, and Empty")
+    # 프롬프트에 넣을 문자열 생성 (예: "L, M, and Empty")
     options_str = ", ".join(belief_options[:-1]) + ", and " + belief_options[-1]
     
     # JSON 템플릿 문자열 동적 생성
-    # 예: "K": int, "M": int, "Empty": int
+    # 예: "L": int, "M": int, "Empty": int
     json_fields = ", ".join([f'"{opt}": int' for opt in belief_options])
 
     # =========================================================================
@@ -235,178 +218,126 @@ def generate_scenario_prompt(df_scenario, condition='reasoning', mode='normal'):
     if mode == 'everystep':
         system_prompt = SYSTEM_PROMPT_EVERY
 
-        if condition == 'vanilla': # vanilla
-            step_instruction = f"""
-            # [TARGET SCENARIO START]
-            # Now, please analyze tne scenario provided below.
-
-            {static_info}
-
-            [Chronological Log]
-            {dynamic_logs}
-
-            Based on the chronological situation above, please perform the following tasks:
-
-            [CRITICAL REQUIREMENT]
-            This log has exactly {max_steps} time steps. Your JSON array MUST contain exactly {max_steps} objects. Do NOT use "..." or skip any steps.
-
-            1. At EVERY time step, rate the student's preference for Truck K, M, and L.
-                (Scale: 1 = Dislike strongly to 7 = Like strongly)
-            2. At EVERY time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.
-                (Scale: 1 = Definitely not there to 7 = Definitely there)
-  
-            Return the result in the following JSON structure:
-            [
-                {{
-                    "time_step": 1,
-                    "desire_scores": {{ "K": int, "M": int, "L": int }},
-                    "belief_scores": {{ {json_fields} }}
-                }},
-                {{
-                    "time_step": 2,
-                    ...
-                }}
-            ]
-            """
-            prompt_content = step_instruction
-
-        else: # reasoning or oneshot
-            # One-Shot일 경우 예시 추가
-            prefix = ""
-            if condition == "oneshot":
-                prefix = f"""
-                {ONE_SHOT_EXAMPLE_EVERY}
+        prefix = ""
+        if condition == "oneshot":
+            prefix = f"""
+            {ONE_SHOT_EXAMPLE_EVERY}
                 
-                # ============================================================================
-                # [END OF EXAMPLE]
-                # The example above is for reference only. Do NOT use its data for the task below.
-                # ============================================================================
-                """
-            step_instruction = f"""
-            # [TARGET SCENARIO START]
-            # Now, please analyze tne scenario provided below.
-
-            {static_info}
-
-            [Chronological Log]
-            {dynamic_logs}
-
-            Based on the chronological situation above, please perform the following tasks:
-
-            [CRITICAL REQUIREMENT]
-            This log has exactly {max_steps} time steps. Your JSON array MUST contain exactly {max_steps} objects. Do NOT use "..." or skip any steps.
-
-            1. At EVERY time step, judge the student's preference in regard to the entire path.
-            - Integrate your analysis of (a) and (b) into a single concise paragraph (strictly under 40 words). Do NOT use bullet points or separate lines.
-                (a) Based on the visibility at t=1, did he/she pass a visible truck to go to an occluded one after t=1?
-                    That means, is there any time step when spot 2 becomes visible?
-                (b) Identify the truck(s) NOT mentioned in the log. Based on the path, what can be inferred about his/her preference for this missing truck(s)?
-            - Then, rate the student's preference for Truck K, M, and L.
-                (Scale: 1 = Dislike strongly to 7 = Like strongly)
-       
-            2. At EVERY time step, judge the student's initial (t=1) belief.
-                - Integrate your analysis of (a) and (b) into a single concise paragraph (strictly under 40 words). Do NOT use bullet points or separate lines.
-                    (a) Which truck was visible and invisible at t=1?
-                    (b) Based on the subsequent path after t=1, did he/she likely expect the missing truck(s) to be in the OCCLUDED area at t=1?
-                - Then, rate the likelihood for {options_str} being in the occluded spot at t=1.
-                    (Scale: 1 = Definitely not there to 7 = Definitely there)
-
-            Return the result in the following JSON structure:
-            [
-                {{
-                    "time_step": 1,
-                    "desire_reasoning": "(a)..., (b)...",
-                    "desire_scores": {{ "K": int, "M": int, "L": int }},
-                    "belief_reasoning": "(a)..., (b)...",
-                    "belief_scores": {{ {json_fields} }}
-                }},
-                {{
-                    "time_step": 2,
-                    ...
-                }}
-            ]
+            # ============================================================================
+            # [END OF EXAMPLE]
+            # The example above is for reference only. Do NOT use its data for the task below.
+            # ============================================================================
             """
-            prompt_content = f"{prefix}\n{step_instruction}"
+
+        step_instruction = f"""
+        # [TARGET SCENARIO START]
+        # Now, please analyze tne scenario provided below.
+
+        {static_info}
+
+        [Chronological Log]
+        {dynamic_logs}
+
+        Based on the chronological situation above, please perform the following tasks:
+
+        [CRITICAL REQUIREMENT]
+        This log has exactly {max_steps} time steps. Your JSON array MUST contain exactly {max_steps} objects. Do NOT use "..." or skip any steps.
+
+        1. At EVERY time step, rate the student's preference for Truck K, L, and M.
+            (Scale: 1 = Dislike strongly to 7 = Like strongly)
+        2. At EVERY time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1 give the current information.
+            (Scale: 1 = Definitely not there to 7 = Definitely there)
+  
+        Return the result in the following JSON structure:
+        [
+            {{
+                "time_step": 1,
+                "desire_scores": {{ "K": int, "L": int, "M": int }},
+                "belief_scores": {{ {json_fields} }}
+            }},
+            {{
+                "time_step": 2,
+                ...
+            }}
+        ]
+        """
+        prompt_content = f"{prefix}\n{step_instruction}"
             
     # [2] Mode: Normal (기존 방식 - 마지막 스텝만 분석)
     else:
         system_prompt = SYSTEM_PROMPT_BASE
 
-        # (A) Vanilla: Reasoning 불필요, 점수만 요청
-        if condition == 'vanilla':
-            task_instruction = f"""
-            # [TARGET SCENARIO START]
-            # Now, please analyze tne scenario provided below.
-
-            {static_info}
-
-            [Chronological Log]
-            {dynamic_logs}
-
-            Based on the chronological situation above, please perform the following tasks:
-
-            1. At the LAST time step, rate the student's preference for Truck K, M, and L.
-                (Scale: 1 = Dislike strongly to 7 = Like strongly)
-        
-            2. At the FIRST time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.
-                (Scale: 1 = Definitely not there to 7 = Definitely there)
-
-            Return the result in the following JSON structure:
-            {{
-                "desire_scores": {{ "K": int, "M": int, "L": int }},
-                "belief_scores": {{ "time_step": 1, {json_fields} }}
-            }}
-            """
-            prompt_content = task_instruction
-
-        # (B) Reasoning, One-Shot
-        else:
-            # One-Shot일 경우 예시 추가
-            prefix = ""
-            if condition == "oneshot":
-                prefix = f"""
-                {ONE_SHOT_EXAMPLE}
+        prefix = ""
+        if condition == "oneshot":
+            prefix = f"""
+            {ONE_SHOT_EXAMPLE}
                 
-                # ============================================================================
-                # [END OF EXAMPLE]
-                # The example above is for reference only. Do NOT use its data for the task below.
-                # ============================================================================
-                """
-            
-            task_instruction = f"""
-            # [TARGET SCENARIO START]
-            # Now, please analyze tne scenario provided below.
-
-            {static_info}
-
-            [Chronological Log]
-            {dynamic_logs}
-
-            Based on the chronological situation above, please perform the following tasks:
-
-            1. At the LAST time step, judge the student's preference in regard to the entire path.
-                - Integrate your analysis of (a) and (b) into a single concise paragraph (strictly under 40 words). Do NOT use bullet points or separate lines.
-                    (a) Based on the visibility at t=1, did he/she pass a visible truck to go to an occluded one after t=1?
-                        That means, is there any time step when spot 2 becomes visible?
-                    (b) Identify the truck(s) NOT mentioned in the log. Based on the path, what can be inferred about his/her preference for this missing truck(s)?
-                - Then, rate the student's preference for Truck K, M, and L.
-                    (Scale: 1 = Dislike strongly to 7 = Like strongly)
-        
-            2. At the FIRST time step, judge the student's initial (t=1) belief.
-                - Integrate your analysis of (a) and (b) into a single concise paragraph (strictly under 40 words). Do NOT use bullet points or separate lines.
-                    (a) Which truck was visible and invisible at t=1?
-                    (b) Based on the subsequent path after t=1, did he/she likely expect the missing truck(s) to be in the OCCLUDED area at t=1?
-                - Then, rate the likelihood for {options_str} being in the occluded spot at t=1.
-                    (Scale: 1 = Definitely not there to 7 = Definitely there)
-
-            Return the result in the following JSON structure:
-            {{
-                "desire_reasoning": "(a)..., (b)...",
-                "desire_scores": {{ "K": int, "M": int, "L": int }},
-                "belief_reasoning": "(a)..., (b)...",
-                "belief_scores": {{ "time_step": 1, {json_fields} }}
-            }}
+            # ============================================================================
+            # [END OF EXAMPLE]
+            # The example above is for reference only. Do NOT use its data for the task below.
+            # ============================================================================
             """
-            prompt_content = f"{prefix}\n{task_instruction}"
+
+        task_instruction = f"""
+        # [TARGET SCENARIO START]
+        # Now, please analyze tne scenario provided below.
+
+        {static_info}
+
+        [Chronological Log]
+        {dynamic_logs}
+
+        Based on the chronological situation above, please perform the following tasks:
+
+        1. At the LAST time step, rate the student's preference for Truck K, L, and M.
+            (Scale: 1 = Dislike strongly to 7 = Like strongly)
+        
+        2. At the FIRST time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.
+            (Scale: 1 = Definitely not there to 7 = Definitely there)
+
+        Return the result in the following JSON structure:
+        {{
+            "desire_scores": {{ "K": int, "L": int, "M": int }},
+            "belief_scores": {{ "time_step": 1, {json_fields} }}
+        }}
+        """
+        prompt_content = f"{prefix}\n{task_instruction}"
 
     return system_prompt, prompt_content
+
+if __name__ == "__main__":
+    # === 시나리오 테스트 ===
+    target_id = 1
+
+    print(f"시나리오 {target_id}번의 prompt 확인을 시작합니다.")
+
+    target_df = df_btom[df_btom['scenario_id'] == target_id]
+
+    if not target_df.empty:
+        # 1. 프롬프트 생성
+        sys_prompt, user_prompt = generate_scenario_prompt(target_df)
+        
+        # 2. 메타 데이터 확인 (Group Desc, Truck Presence)
+        row0 = target_df.iloc[0]
+        group_desc = row0['group_desc']
+        
+        trucks = []
+        if row0['K_x'] != 0 or row0['K_y'] != 0: trucks.append('K')
+        if row0['L_x'] != 0 or row0['L_y'] != 0: trucks.append('L')
+        if row0['M_x'] != 0 or row0['M_y'] != 0: trucks.append('M')
+        truck_str = ", ".join(trucks) + " present" if trucks else "No trucks"
+
+        print(f"=== Scenario {target_id} Metadata ===")
+        print(f"Group: {group_desc}")
+        print(f"Trucks: {truck_str}")
+        print("-" * 50)
+        
+        print("\n[Generated System Prompt]")
+        print(sys_prompt)
+        print("-" * 50)
+        
+        print("\n[Generated User Prompt]")
+        print(user_prompt)
+        print("-" * 50)
+    else:
+        print(f"Scenario {target_id} not found in dataset.")

@@ -41,7 +41,7 @@ def call_model_api(model_name, system_prompt, user_prompt):
             # ----------------------------------------
             # CASE 1: OpenAI O1 Series (Reasoning Model)
             # ----------------------------------------
-            if "o1-" in model_name: 
+            if "o4" in model_name: 
                 # System Role 불가 -> User 프롬프트와 합침
                 # Temperature 파라미터 불가 (Default 1 고정)
                 combined_prompt = f"Instructions:\n{system_prompt}\n\nTask:\n{user_prompt}"
@@ -50,7 +50,7 @@ def call_model_api(model_name, system_prompt, user_prompt):
                     model=model_name,
                     messages=[{"role": "user", "content": combined_prompt}],
                     # temperature=1, # o1은 지원 안함
-                    response_format={"type": "json_object"} # 미지원일 수도...
+                    response_format={"type": "json_object"}
                 )
                 return response.choices[0].message.content
 
@@ -114,7 +114,7 @@ def call_model_api(model_name, system_prompt, user_prompt):
             elif "claude" in model_name:
                 response = client_claude.messages.create(
                     model=model_name,
-                    max_tokens=2000,
+                    max_tokens=4000,
                     system=system_prompt,
                     messages=[
                         {"role": "user", "content": user_prompt}
@@ -132,11 +132,21 @@ def call_model_api(model_name, system_prompt, user_prompt):
         
         except Exception as e:
             error_msg = str(e)
+
+            # 1. 내 호출 한도가 초과된 경우 (길게 대기)
             if "429" in error_msg or "Quota exceeded" in error_msg:
                 wait_time = 20 + (retry_count * 10)
                 print(f"\n[Rate Limit] {model_name}: Retrying in {wait_time}s... ({retry_count+1}/{MAX_RETRIES})")
                 time.sleep(wait_time)
                 retry_count += 1
+
+            # 2. 서버 과부하 및 네트워크 연결 오류 - 짧게 점진적으로 대기
+            elif any(err in error_msg for err in ["529", "overloaded_error", "Connection error", "ConnectError"]):
+                wait_time = 2 ** retry_count  # 1초, 2초, 4초, 8초...
+                print(f"\n[Network/Server Issue] {model_name}: Retrying in {wait_time}s... ({retry_count+1}/{MAX_RETRIES})")
+                time.sleep(wait_time)
+                retry_count += 1
+
             else:
                 print(f"\n[Error] {model_name}: {e}")
                 return None 

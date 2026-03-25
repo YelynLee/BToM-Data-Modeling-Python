@@ -1,8 +1,17 @@
 import os
+import sys
 import time
 import argparse
 import pandas as pd
 from tqdm import tqdm
+
+# 현재 파일(main_experiment.py)이 있는 경로를 기준으로 src 폴더의 절대 경로를 만듦
+src_path = os.path.join(os.path.dirname(__file__), 'src')
+
+# 파이썬이 모듈을 찾을 때 src 폴더도 뒤져보도록 경로 추가
+if src_path not in sys.path:
+    sys.path.append(src_path)
+
 from src.dataset import df_btom
 from src.prompts import generate_scenario_prompt
 from src.api_client import call_model_api

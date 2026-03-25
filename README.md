@@ -127,6 +127,7 @@ python main_experiment.py --model gpt-4o --condition oneshot --mode normal --sub
 # if the target model is reference data (human, btom, truebelief, nocost, motionheuristic), you don't need condition and mode
 python run_analysis.py --model btom --baseline human --type scatter
 python run_analysis.py --model gpt-4o --baseline btom --condition reasoning --mode normal --type rsa
+python run_analysis.py --model gemini-2.5-flash --baseline btom --condition vanilla --mode everystep --type phase
 ```
 
 

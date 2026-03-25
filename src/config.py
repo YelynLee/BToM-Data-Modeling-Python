@@ -16,7 +16,7 @@ REFERENCE_PKL_DIR = "data"
 STIMULI_MAT_PATH = "C:/Users/user/Desktop/BToM-master/BToM-master/BeliefDesireInference/data/stimuli.mat"
 
 # BToM Everystep Data 원본 경로
-BTOM_EVERY_MAT_PATH = "C:/Users/user/Desktop/project/BToM 코드/data/btom/btom_everystep_beta2.5.mat"
+BTOM_EVERY_MAT_PATH = "data/btom/btom_everystep_beta2.5.mat"
 
 # =========================================================================
 # 행동 그룹 정의 (Labeling용)

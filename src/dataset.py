@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 
 # 공통 설정 가져오기
-from src.config import get_group_indices, BEHAVIOR_GROUPS, STIMULI_MAT_PATH
-from src.utils import get_clean_value
+from config import get_group_indices, BEHAVIOR_GROUPS, STIMULI_MAT_PATH
+from utils import get_clean_value
 
 def extract_btom_data(mat_file_path):
     try:
