@@ -1,6 +1,6 @@
 import os
 import argparse
-from src.config import HUMAN_PKL_PATH, BASE_RESULTS_DIR, REFERENCE_PKL_DIR
+from src.config import HUMAN_PKL_PATH, BASE_RESULTS_DIR, REFERENCE_PKL_DIR, STEPWISE_MODES, base_mode, mode_folder, result_dir
 from analysis.plot_bars import plot_comparison_bars
 from analysis.plot_scatter import plot_scatter_analysis
 from analysis.plot_rmse_corr import plot_combined_metrics
@@ -9,17 +9,15 @@ from src.prepare_everystep import run_prepare_everystep
 from analysis.plot_everystep import run_plot_everystep
 
 def resolve_pkl_path(name, condition, mode):
-    """이름(model/human/btom)에 따라 정확한 Pickle 경로를 반환하는 헬퍼 함수"""
+    """이름(model/human/btom)에 따라 정확한 Pickle 경로를 반환하는 헬퍼 함수
+    mode: 'normal' 또는 결과 하위 폴더 이름('everystep', 'prefixstep', 'prefixstep_cur' 등)"""
     name_lower = name.lower()
     if name_lower == "human":
         return HUMAN_PKL_PATH
     elif name_lower in ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]:
         return os.path.join(REFERENCE_PKL_DIR, name_lower, f"{name_lower}_data.pkl")
     else:
-        if mode == "everystep":
-            return os.path.join(BASE_RESULTS_DIR, name_lower, condition, "everystep", "model_data.pkl")
-        else:
-            return os.path.join(BASE_RESULTS_DIR, name_lower, condition, "model_data.pkl")
+        return os.path.join(result_dir(name_lower, condition, "" if mode == "normal" else mode), "model_data.pkl")
 
 def get_base_dir(name, condition, mode):
     """
@@ -29,10 +27,7 @@ def get_base_dir(name, condition, mode):
     if name_lower in ["human", "btom", "truebelief", "nocost", "motionheuristic", "hindsight"]:
         return os.path.join(BASE_RESULTS_DIR, name_lower)
     else:
-        if mode == "everystep":
-            return os.path.join(BASE_RESULTS_DIR, name_lower, condition, "everystep")
-        else:
-            return os.path.join(BASE_RESULTS_DIR, name_lower, condition)
+        return result_dir(name_lower, condition, "" if mode == "normal" else mode)
 
 def run_analysis(model_name, condition, mode, baseline="human", analysis_type="all", enable_vpa=False):
     print(f"🚀 분석 시작: Target=[{model_name}], Baseline=[{baseline.upper()}]")
@@ -93,8 +88,8 @@ def run_analysis(model_name, condition, mode, baseline="human", analysis_type="a
 
     # (E) Phase Plots
     if analysis_type in ["all", "phase"]:
-        if mode == "everystep":
-            print("\n--- [5] Drawing Phase Trajectory Plots (Everystep Only) ---")
+        if base_mode(mode) in STEPWISE_MODES:
+            print(f"\n--- [5] Drawing Phase Trajectory Plots ({mode}) ---")
             
             ref_models = ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]
             
@@ -105,7 +100,7 @@ def run_analysis(model_name, condition, mode, baseline="human", analysis_type="a
             
             # LLM일 경우: CSV 전처리 후 우등생 피험자 선별하여 플롯
             else:
-                selected_subjects = run_prepare_everystep(model_name, condition)
+                selected_subjects = run_prepare_everystep(model_name, condition, mode)
                 if not selected_subjects:
                     print("❌ Error: 선별된 피험자가 없습니다. Phase Plot을 그릴 수 없습니다.")
                 else:
@@ -115,7 +110,7 @@ def run_analysis(model_name, condition, mode, baseline="human", analysis_type="a
         else:
             # 사용자가 normal 모드인데 강제로 --type phase를 요청한 경우 방어
             if analysis_type == "phase":
-                print("\n❌ Warning: 'phase' 분석은 '--mode everystep'에서만 가능합니다. 건너뜁니다.")
+                print("\n❌ Warning: 'phase' 분석은 '--mode everystep / prefixstep'에서만 가능합니다. 건너뜁니다.")
 
     print("\n✨ 모든 분석 및 시각화 완료!")
 
@@ -132,8 +127,10 @@ if __name__ == "__main__":
                         choices=["vanilla", "reasoning", "oneshot"],
                         help="Experiment condition")
     parser.add_argument("--mode", type=str, default="normal", 
-                        choices=["normal", "everystep"], 
+                        choices=["normal", "everystep", "prefixstep"], 
                         help="Experiment option")
+    parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과(*_cur) 분석")
+    parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과(*_mask) 분석")
     parser.add_argument("--type", type=str, default="all",
                         choices=["all", "bar", "scatter", "rmse", "rsa", "phase"],
                         help="Specific analysis to run (default: all)")
@@ -142,4 +139,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    run_analysis(args.model, args.condition, args.mode, args.baseline, args.type, args.vpa)
+    # 변형 플래그를 반영한 결과 하위 폴더 이름 (예: prefixstep + --current_belief -> prefixstep_cur)
+    mode_dir = mode_folder(args.mode, args.current_belief, args.mask_hidden) or "normal"
+    run_analysis(args.model, args.condition, mode_dir, args.baseline, args.type, args.vpa)
