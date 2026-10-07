@@ -131,5 +131,11 @@ python run_analysis.py --model gemini-2.5-flash --baseline btom --condition vani
 ```
 
 
+- To plot the scenario-level bias, enter:
+```bash
+python analysis/plot_bias.py --model gemini-2.5-flash --condition vanilla --n_extremes 5 --wall_x 2 --wall_width 13
+```
+
+
 ## 5. Results (In Progress)
 - Please refer to the plot images in /results

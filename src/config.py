@@ -5,18 +5,15 @@
 BASE_RESULTS_DIR = "results"
 
 # Human Data 원본 경로
-HUMAN_MAT_PATH = "C:/Users/user/Desktop/BToM-master/BToM-master/BeliefDesireInference/data/human_data.mat"
+HUMAN_MAT_PATH = "data/human_data.mat"
 HUMAN_PKL_PATH = "data/human/human_data.pkl"
 
 # Reference Models Data 원본 경로
-REFERENCE_MAT_PATH = "C:/Users/user/Desktop/BToM-master/BToM-master/BeliefDesireInference/data"
+REFERENCE_MAT_PATH = "C:/Users/user/Documents/MATLAB/BToM_paper/data"
 REFERENCE_PKL_DIR = "data"
 
 # Stimuli Data 원본 경로
-STIMULI_MAT_PATH = "C:/Users/user/Desktop/BToM-master/BToM-master/BeliefDesireInference/data/stimuli.mat"
-
-# BToM Everystep Data 원본 경로
-BTOM_EVERY_MAT_PATH = "data/btom/btom_everystep_beta2.5.mat"
+STIMULI_MAT_PATH = "data/stimuli.mat"
 
 # =========================================================================
 # 행동 그룹 정의 (Labeling용)

@@ -77,6 +77,10 @@ def plot_comparison_bars(model_pkl_path, output_img_path, model_name="Model"):
         ax_d.set_ylim(0, 6)
         ax_d.set_xticks(x)
         ax_d.set_xticklabels(DESIRE_LABELS, fontsize='x-large')
+
+        # [추가된 부분] 옅은 가로선 배경 추가
+        ax_d.set_axisbelow(True) # 선을 막대 뒤로 배치
+        ax_d.grid(axis='y', linestyle=':', alpha=0.6, color='gray') # 옅은 점선
         
         # Y축 라벨: 0,1,2,3,4,5,6 -> 실제 의미 1,2,3,4,5,6,7
         ax_d.set_yticks(range(7))
@@ -114,6 +118,10 @@ def plot_comparison_bars(model_pkl_path, output_img_path, model_name="Model"):
         ax_b.set_ylim(0, 1.05) # 확률이므로 0~1
         ax_b.set_xticks(x)
         ax_b.set_xticklabels(BELIEF_LABELS, fontsize='x-large') # L, M, N
+
+        # [추가된 부분] 옅은 가로선 배경 추가
+        ax_b.set_axisbelow(True) # 선을 막대 뒤로 배치
+        ax_b.grid(axis='y', linestyle=':', alpha=0.6, color='gray') # 옅은 점선
         
         if i == 0:
             ax_b.set_ylabel('Belief Probability', fontsize='large', fontweight='bold')

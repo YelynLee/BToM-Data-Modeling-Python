@@ -1,12 +1,23 @@
 import os
+import sys
+import pickle
 import argparse
-import glob
 import numpy as np
 import pandas as pd
 from collections import deque
 import scipy.io
-from dataset import df_btom
-from config import BASE_RESULTS_DIR, BEHAVIOR_GROUPS, get_group_indices, BTOM_EVERY_MAT_PATH
+
+# 현재 스크립트(analysis 폴더)의 상위 경로를 파이썬 탐색 경로에 추가
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir) # 상위 폴더 (프로젝트 루트)
+
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+from src.prepare_motionheur_everystep import generate_mh_scores
+from src.dataset import df_btom
+from src.config import BASE_RESULTS_DIR, REFERENCE_PKL_DIR, HUMAN_PKL_PATH
+from src.utils import get_valid_scenarios, build_master_dataframe
 
 # =========================================================================
 # 1. 벽을 우회하는 실제 최단 경로(BFS) 계산 헬퍼 함수
@@ -204,281 +215,207 @@ def apply_phase_labeling(df):
     # [A] 첫 타임스텝(t=1)은 무조건 'Start'
     df.loc[df['time_step'] == min_ts, 'phase'] = 'Start'
     
-    # [B] 마지막 타임스텝 처리
-    # (1) group_id가 6, 7이 '아닌' 경우 ➔ 'Selected'
-    mask_selected = (df['time_step'] == max_ts) & (~df['group_id'].isin([6, 7]))
-    df.loc[mask_selected, 'phase'] = 'Selected'
+    # 💡 [B] 마지막 타임스텝 및 BToM 연장 스텝 처리 (핵심 수정 부분)
+    # 마지막 타임스텝의 좌표를 모든 행에 브로드캐스팅하여 임시 저장
+    df['final_x'] = df.groupby(['subject_id', 'scenario_id'])['agent_x'].transform('last')
+    df['final_y'] = df.groupby(['subject_id', 'scenario_id'])['agent_y'].transform('last')
     
-    # (2) group_id가 6, 7인 경우 ➔ 'Stop between G1 and G2'
+    # (1) group_id가 6, 7이 '아닌' 경우 ➔ 일반 'Selected' 처리 (max_ts)
+    mask_selected_max = (df['time_step'] == max_ts) & (~df['group_id'].isin([6, 7]))
+    df.loc[mask_selected_max, 'phase'] = 'Selected'
+    
+    # (2) BToM 연장 대응: max_ts - 1 이면서 좌표가 최종 목적지와 완전히 동일한 경우 똑같이 'Selected'
+    mask_selected_extended = (df['time_step'] == max_ts - 1) & (df['agent_x'] == df['final_x']) & (df['agent_y'] == df['final_y']) & (~df['group_id'].isin([6, 7]))
+    df.loc[mask_selected_extended, 'phase'] = 'Selected'
+    
+    # (3) group_id가 6, 7인 경우 ➔ 'Stop between G1 and G2'
     # (앞선 일반 'Stop' 로직으로 인해 'Stop'으로 덮어씌워졌을 수 있으므로 다시 명확하게 잡아줌)
-    mask_stop_between = (df['time_step'] == max_ts) & (df['group_id'].isin([6, 7]))
-    df.loc[mask_stop_between, 'phase'] = 'Stop between G1 and G2'
+    mask_stop_max = (df['time_step'] == max_ts) & (df['group_id'].isin([6, 7]))
+    df.loc[mask_stop_max, 'phase'] = 'Stop between G1 and G2'
+    
+    # (선택) group_id 6, 7도 btom inverse experiment에 포함할 예정이라면
+    mask_stop_extended = (df['time_step'] == max_ts - 1) & (df['agent_x'] == df['final_x']) & (df['agent_y'] == df['final_y']) & (df['group_id'].isin([6, 7]))
+    df.loc[mask_stop_extended, 'phase'] = 'Stop between G1 and G2'
+
+    # 임시 컬럼 삭제
+    df.drop(['final_x', 'final_y'], axis=1, inplace=True)
 
     return df
 
 # =========================================================================
-# 3. 데이터 정합성 검토 및 '유효한 시나리오' 추출 (Valid Subset Extraction)
+# 3. Reference Everystep 데이터 로드 함수
 # =========================================================================
-def get_valid_scenarios(model_name, condition):
+def load_reference_everystep(ref_model_name):
     """
-    df_btom과 완벽하게 time_step 개수가 일치하는 (subject_id, scenario_id) 쌍만
-    추출하여 set 형태로 반환합니다.
-    -> 추후에 새롭게 응답을 받아야 할 것. 현재는 시간 문제로 스킵.
+    지정된 Reference Model의 매 스텝 데이터(.mat)를 불러와
+    df_btom 구조와 매핑하고 Phase를 라벨링합니다. (Prior 데이터 t=0 포함)
     """
-    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
-    csv_files = sorted(glob.glob(os.path.join(target_dir, "subject_*.csv")))
+    df_merged = None # 최종 병합될 데이터프레임 초기화
     
-    if not csv_files:
-        print(f"❌ Error: No CSV files found to validate in {target_dir}")
-        return set()
-
-    expected_counts = df_btom.groupby('scenario_id')['time_step'].count().to_dict()
-    
-    print("\n" + "="*60)
-    print("🔍 Extracting Valid Scenarios Started")
-    print("="*60)
-    
-    valid_keys = set() # 정상적인 (subject_id, scenario_id)를 담을 세트
-    total_errors = 0
-    total_valid = 0
-
-    # 피험자별 유효 시나리오 목록을 담을 딕셔너리 (교집합 계산용)
-    valid_by_subj = {i: set() for i in range(1, len(csv_files) + 1)}
-    
-    for subj_idx, file_path in enumerate(csv_files, start=1):
-        try:
-            df_model = pd.read_csv(file_path)
-            actual_counts = df_model.groupby('scenario_id')['time_step'].count().to_dict()
-            
-            for sc_id, expected_len in expected_counts.items():
-                actual_len = actual_counts.get(sc_id, 0)
-                
-                if expected_len == actual_len:
-                    # ✅ 행 개수가 완벽히 일치하는 경우만 수집
-                    valid_keys.add((subj_idx, sc_id))
-                    valid_by_subj[subj_idx].add(sc_id)
-                    total_valid += 1
-                else:
-                    # ❌ 누락된 경우 카운트 (터미널 도배를 막기 위해 에러 로그는 생략하거나 요약 가능)
-                    total_errors += 1
-                    
-        except Exception as e:
-            print(f"  ❌ Subject {subj_idx}: Failed to read. Error: {e}")
-
-    # 🌟 [추가된 로직] 78개(전체 시나리오 수)를 모두 완벽하게 생성한 피험자 동적 추출
-    max_scenarios = len(expected_counts)
-    perfect_subjects = []
-
-    print("\n  📊 [Valid Scenarios per Subject]")
-    for subj_idx in sorted(valid_by_subj.keys()):
-        valid_count = len(valid_by_subj[subj_idx])
-        print(f"    - Subject {subj_idx:02d}: {valid_count:02d} valid scenarios")
-        if valid_count == max_scenarios:
-            perfect_subjects.append(subj_idx)
-
-    # -------------------------------------------------------------------------
-    # 🌟 [메인 로직] 분기점: Perfect Subjects vs Fallback Top 5
-    # -------------------------------------------------------------------------
-    final_valid_keys = set()
-    selected_subjects = []
-    
-    if len(perfect_subjects) >= 5:
-        # [플랜 A] 완벽한 피험자가 5명 이상 존재할 경우
-        print(f"\n  🌟 [Plan A: Perfect Subjects Found]")
-        print(f"    -> {len(perfect_subjects)} subjects completed all {max_scenarios} scenarios.")
+    # ---------------------------------------------------------------------
+    # 🌟 [분기 1] MotionHeuristic 모델인 경우 (동적 연산)
+    # ---------------------------------------------------------------------
+    if ref_model_name == 'motionheuristic':
+        print(f"\n📥 Generating {ref_model_name.upper()} Everystep data dynamically...")
         
-        selected_subjects = perfect_subjects
-        # 이미 찾아둔 raw 데이터 중에서 완벽한 피험자의 데이터만 쏙 빼서 씁니다.
-        final_valid_keys = {(s, sc) for (s, sc) in valid_keys if s in selected_subjects}
+        # 1. human_data.pkl 로드 및 DataFrame(Target Y)으로 언롤링(Unrolling)
+        if not os.path.exists(HUMAN_PKL_PATH):
+            print(f"⚠️ Error: Human target data not found at {HUMAN_PKL_PATH}")
+            return None
+            
+        with open(HUMAN_PKL_PATH, 'rb') as f:
+            human_data = pickle.load(f)
+            
+        des_arr = human_data['des_inf_mean']       # shape: (3, 78)
+        bel_arr = human_data['bel_inf_mean_norm']  # shape: (3, 78)
+        
+        records = []
+        for sc_idx in range(78):
+            sc_id = sc_idx + 1 # 1-based index (시나리오 1~78)
+            
+            # Desire 매핑: 행 0(K), 1(L), 2(M)
+            records.append({'scenario_id': sc_id, 'model_type': 'Desire', 'truck': 'K', 'value': des_arr[0, sc_idx]})
+            records.append({'scenario_id': sc_id, 'model_type': 'Desire', 'truck': 'L', 'value': des_arr[1, sc_idx]})
+            records.append({'scenario_id': sc_id, 'model_type': 'Desire', 'truck': 'M', 'value': des_arr[2, sc_idx]})
+            
+            # Belief 매핑: 행 0(L), 1(M), 2(N: Empty)
+            records.append({'scenario_id': sc_id, 'model_type': 'Belief', 'truck': 'L', 'value': bel_arr[0, sc_idx]})
+            records.append({'scenario_id': sc_id, 'model_type': 'Belief', 'truck': 'M', 'value': bel_arr[1, sc_idx]})
+            records.append({'scenario_id': sc_id, 'model_type': 'Belief', 'truck': 'N', 'value': bel_arr[2, sc_idx]})
+            
+        df_human_target = pd.DataFrame(records)
+        
+        # 2. world_mapping 동적 생성 (R 원본 논리 적용)
+        # R 코드에 따르면 Group 4, 5, 7은 "G2 absent(우측 상단 빈 공간)" 시나리오입니다.
+        # 따라서 이 그룹들은 world = 0 (Empty), 나머지는 world = 1 (L 트럭 존재)로 매핑합니다.
+        world_mapping = {}
+        for sc_id, group_data in df_btom.groupby('scenario_id'):
+            grp = group_data['group_id'].iloc[0]
+            # 4: Check-GoBack(Absent), 5: No Check(Absent), 7: Check-Partial(Absent)
+            world_mapping[sc_id] = 0 if grp in [4, 5, 7] else 1
+            
+        # 3. 외부 모듈 호출 (가중치 피팅 및 스텝별 점수 산출)
+        df_merged = generate_mh_scores(df_btom, df_human_target, world_mapping, exclude_irrational=True)
+        
+        # BToM 평가 스크립트와의 호환성을 위해 인지 모델은 피험자 0번으로 취급
+        df_merged['subject_id'] = 0
+
+    # ---------------------------------------------------------------------
+    # 🌟 [분기 2] 기존 .mat 기반 모델인 경우 (BToM, TrueBelief 등)
+    # ---------------------------------------------------------------------
     else:
-        # [플랜 B] 완벽한 피험자가 5명보다 적을 경우 (Fallback)
-        print(f"\n  ⚠️ [Plan B: No Perfect Subjects] -> Switching to Top 5 Fallback Logic")
-        sorted_subjects = sorted(valid_by_subj.keys(), key=lambda x: len(valid_by_subj[x]), reverse=True)
-        top_5_subjects = sorted_subjects[:5]
+        # 💡 최적 Beta 및 파일명 매핑 (필요시 이 부분만 수정하시면 됩니다)
+        file_mapping = {
+            'btom': 'btom_everystep_beta2.5.mat',
+            'truebelief': 'truebelief_everystep_beta9.0.mat',
+            'nocost': 'nocost_everystep_beta2.5.mat',
+            'hindsight': 'hindsight_everystep_beta3.5.mat'
+        }
         
-        print(f"  🏆 [Top 5 Subjects Selected]")
-        for subj in top_5_subjects:
-            print(f"    - Subject {subj:02d} (Passed: {len(valid_by_subj[subj])})")
-        selected_subjects = top_5_subjects
-
-        # 공통 시나리오 교집합 추출
-        s_common_scenarios = set.intersection(*[valid_by_subj[s] for s in selected_subjects]) if selected_subjects else set()
-        print(f"\n  🎯 [Common Valid Scenarios across Top 5 Subjects]")
-        print(f"    -> {len(s_common_scenarios)} total common scenarios.")
-
-        # 7개 그룹 커버리지 검토 (플랜 B 전용)
-        print("\n  🔍 [Group Coverage Check]")
-        groups_raw = get_group_indices(include_irrational=True)
-        missing_groups = []
-        
-        for g_idx, group_scenarios in enumerate(groups_raw, start=1):
-            intersection = s_common_scenarios.intersection(group_scenarios)
-            if len(intersection) == 0:
-                missing_groups.append(g_idx)
-                print(f"    ⚠️ Group {g_idx}: 0 common scenarios! (Plotting might fail for this group)")
-            else:
-                print(f"    ✅ Group {g_idx}: {len(intersection)} common scenarios.")
-                
-        if missing_groups:
-            print(f"    🚨 Warning: 그룹 {missing_groups}에 공통 시나리오가 없어 서브플롯이 비어 있을 수 있습니다.")
-        else:
-            print("    🎉 Excellent! 모든 7개 그룹에 최소 1개 이상의 공통 시나리오가 존재합니다.")
-
-        # Master DataFrame 생성을 위해 Top 5 공통 시나리오만 남기기
-        for subj in selected_subjects:
-            for sc in s_common_scenarios:
-                final_valid_keys.add((subj, sc))
-
-    # -------------------------------------------------------------------------
-    # 모든 피험자들의 공통 시나리오(Intersection) 계산
-    # -------------------------------------------------------------------------
-    if valid_by_subj:
-        common_scenarios = set.intersection(*valid_by_subj.values())
-    else:
-        common_scenarios = set()
-        
-    print(f"\n  🎯 [Common Valid Scenarios across ALL subjects]")
-    print(f"    -> {len(common_scenarios)} total common scenarios.")
-
-    if common_scenarios:
-        # 보기 좋게 오름차순 정렬해서 출력
-        print(f"    -> Scenario IDs: {sorted(list(common_scenarios))}")
-    else:
-        print(f"    -> None 😢")
-        
-    print("\n  ================ Summary ================")
-    print(f"  ✅ Total Found: {total_valid} valid scenario pairs.")
-    print(f"  🚨 Total Dropped: {total_errors} scenario pairs due to missing time_steps.")
-    print(f"  ✅ Prepared {len(final_valid_keys)} perfectly balanced pairs for the Master DataFrame.")
-    print("-" * 60)
-    
-    return final_valid_keys, selected_subjects
-
-# =========================================================================
-# 4. Master DataFrame 생성 로직
-# =========================================================================
-def build_master_dataframe(model_name, condition, valid_keys):
-    """
-    df_btom과 모델의 Everystep 결과를 결합하여 마스터 데이터프레임을 생성합니다.
-    """
-    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
-    csv_files = sorted(glob.glob(os.path.join(target_dir, "subject_*.csv")))
-    
-    if not valid_keys:
-        print(f"❌ Error: No valid data to build master dataframe.")
-        return None
-
-    all_subjects_data = []
-
-    # 1. 피험자별 데이터 병합
-    print(f"🔗 Merging Valid subjects data...")
-    for subj_idx, file_path in enumerate(csv_files, start=1):
-        df_model = pd.read_csv(file_path)
-        
-        # 🌟 [핵심] 현재 피험자(subj_idx)의 유효한 scenario_id만 필터링
-        valid_sc_ids = [sc_id for (s_id, sc_id) in valid_keys if s_id == subj_idx]
-        
-        if not valid_sc_ids:
-            continue # 이 피험자는 정상적인 시나리오가 아예 없다면 건너뜀
+        if ref_model_name not in file_mapping:
+            print(f"\n⚠️ Error: Unknown reference model '{ref_model_name}'.")
+            return None
             
-        df_model_valid = df_model[df_model['scenario_id'].isin(valid_sc_ids)]
-
-        # -------------------------------------------------------------
-        # 🐞 [디버깅 추가] 시나리오 12번 병합(Merge) 과정 추적
-        # -------------------------------------------------------------
-        # (1) 일단 outer로 병합하고 indicator=True를 줘서 데이터의 출처('_merge')를 확인합니다.
-        df_merged_debug = pd.merge(df_btom, df_model, 
-                             on=['scenario_id', 'time_step'], 
-                             how='outer', 
-                             indicator=True)
+        mat_filename = file_mapping[ref_model_name]
+        mat_path = os.path.join(REFERENCE_PKL_DIR, ref_model_name, mat_filename)
         
-        # (2) 시나리오 12번의 데이터가 어떻게 매칭되었는지 터미널에 출력 (피험자 1번일 때만)
-        if subj_idx == 1:
-            sc12_debug = df_merged_debug[df_merged_debug['scenario_id'] == 12]
-            if not sc12_debug.empty:
-                print(f"\n[DEBUG] Subject 1, Scenario 12 Merge Status:")
-                # _merge 컬럼: 'both'(양쪽 다 있음), 'left_only'(df_btom에만 있음), 'right_only'(df_model에만 있음)
-                print(sc12_debug[['time_step', '_merge']].head(15))
-                print("-" * 50)
-        # -------------------------------------------------------------
+        if not os.path.exists(mat_path):
+            print(f"\n⚠️ Notice: {ref_model_name.upper()} everystep data not found at {mat_path}. Skipping overlay.")
+            return None
+            
+        print(f"\n📥 Loading {ref_model_name.upper()} Everystep data from {mat_path}...")
+        mat = scipy.io.loadmat(mat_path, squeeze_me=True)
         
-        # 필터링된 깨끗한 데이터만 inner merge (이제 inner를 써도 잘려나갈 걱정이 없음!)
-        df_merged = pd.merge(df_btom, df_model_valid, 
-                             on=['scenario_id', 'time_step'], 
-                             how='inner')
-        # 피험자 번호 명시
-        df_merged.insert(0, 'subject_id', subj_idx)
-        all_subjects_data.append(df_merged)
+        b_marg = mat['belief_marg'] 
+        r_marg = mat['reward_marg']
+        
+        # -------------------------------------------------------------
+        # 💡 [핵심 수정] 궤적 데이터 매핑 방식 변경 (Off-by-one 밀림 방지)
+        # -------------------------------------------------------------
+        # 1. 원본 궤적 데이터(df_btom)의 사본을 만듭니다.
+        df_merged = df_btom.copy()
 
-    # 2. 전체 마스터 데이터프레임 완성
-    df_master = pd.concat(all_subjects_data, ignore_index=True)
+        # 💡 [핵심 수정] apply_phase_labeling에서 발생하는 KeyError 방지
+        # 인지 모델은 피험자 0번(정답)으로 취급함을 명시적으로 할당
+        df_merged['subject_id'] = 0
+        
+        # 병합할 빈 리스트들
+        r_K_list, r_L_list, r_M_list = [], [], []
+        b_L_list, b_M_list, b_Empty_list = [], [], []
+        
+        for idx, row in df_merged.iterrows():
+            ns = int(row['scenario_id']) - 1 # 0-based index
+            t  = int(row['time_step']) # MATLAB의 time_step (1부터 시작)
+            
+            b_arr = b_marg[ns]
+            r_arr = r_marg[ns]
 
-    # 3. [핵심] Phase Labeling 로직 적용
-    print("🏷️ Applying Phase Labeling...")
-    df_master = apply_phase_labeling(df_master)
-
-    # 4. 저장
-    output_path = os.path.join(target_dir, "everystep_valid_only.csv")
-    df_master.to_csv(output_path, index=False)
-    print(f"✅ Master DataFrame saved: {output_path} (Shape: {df_master.shape})")
+            # 만약 time_step이 1개라서 1D 배열(크기 3)로 추출되었다면 2D(3, 1)로 변경
+            if b_arr.ndim == 1: b_arr = b_arr.reshape(3, -1)
+            if r_arr.ndim == 1: r_arr = r_arr.reshape(3, -1)
+            
+            # 💡 t=1(출발점)에는 BToM 배열의 인덱스 0(Prior)을, t=2에는 인덱스 1(Post1)을 매핑!
+            matlab_idx = min(t - 1, b_arr.shape[1] - 1)
+            
+            # 안전장치: 인덱스가 범위를 벗어나지 않도록
+            matlab_idx = min(matlab_idx, b_arr.shape[1] - 1)
+            
+            r_K_list.append(r_arr[0, matlab_idx])
+            r_L_list.append(r_arr[1, matlab_idx])
+            r_M_list.append(r_arr[2, matlab_idx])
+            b_L_list.append(b_arr[0, matlab_idx])
+            b_M_list.append(b_arr[1, matlab_idx])
+            b_Empty_list.append(b_arr[2, matlab_idx])
+            
+        df_merged['desire_K'] = r_K_list
+        df_merged['desire_L'] = r_L_list
+        df_merged['desire_M'] = r_M_list
+        df_merged['belief_L'] = b_L_list
+        df_merged['belief_M'] = b_M_list
+        df_merged['belief_Empty'] = b_Empty_list
     
-    return df_master
+    # -------------------------------------------------------------
+    # 💡 [핵심 연장] 배열의 마지막 값(최종 Posterior) 처리
+    # -------------------------------------------------------------
+    # 각 시나리오의 마지막 time_step 행을 복사하여 time_step을 +1 증가시킵니다.
+    idx_last_steps = df_merged.groupby('scenario_id')['time_step'].idxmax()
+    df_extensions = df_merged.loc[idx_last_steps].copy()
+    df_extensions['time_step'] += 1
+    
+    # 연장된 행에 직전 행(각 시나리오의 원본 마지막 스텝)의 추론 점수들을 그대로 복사하여 유지시킵니다.
+    score_columns = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
+    for col in score_columns:
+        df_extensions[col] = df_merged.loc[idx_last_steps, col].values
+    
+    # 원래 데이터프레임과 연장된 행들을 합치고 재정렬
+    df_merged = pd.concat([df_merged, df_extensions]).sort_values(['scenario_id', 'time_step']).reset_index(drop=True)
+
+    print(f"  -> Applying Phase Labeling to {ref_model_name.upper()}...")
+    df_final = apply_phase_labeling(df_merged)
+
+    return df_final
 
 # =========================================================================
-# 5. BToM Everystep 데이터 로드 함수
+# 추가 실험용 데이터 추출 스크립트 (Check-GoBack, Check-Stay)
 # =========================================================================
-def load_btom_everystep(mat_path=BTOM_EVERY_MAT_PATH):
-    """
-    MATLAB에서 추출한 BToM 모델의 매 스텝 데이터(.mat)를 불러와
-    마스터 데이터프레임 구조와 똑같이 매핑하고 Phase를 라벨링합니다.
-    """
-    if not os.path.exists(mat_path):
-        print(f"\n⚠️ Notice: BToM everystep data not found at {mat_path}. Skipping overlay.")
-        return None
-        
-    print(f"\n📥 Loading BToM Everystep data from {mat_path}...")
-    mat = scipy.io.loadmat(mat_path, squeeze_me=True)
+def export_btom_experiment_data(ref_model_name):
+    # 입력받은 ref_model_name으로 데이터 로드
+    df_ref = load_reference_everystep(ref_model_name)
     
-    b_marg = mat['belief_marg'] 
-    r_marg = mat['reward_marg']
+    # 타겟 그룹 필터링
+    # 1: Check-GoBack(Present), 2: Check-Stay(Present), 4: Check-GoBack(Absent)
+    target_groups = [1, 2, 4]
+    df_target = df_ref[df_ref['group_id'].isin(target_groups)].copy()
     
-    rows = []
-    # 78개 시나리오 순회
-    for ns in range(78):
-        sc_id = ns + 1
-        
-        b_arr = b_marg[ns]
-        r_arr = r_marg[ns]
-        
-        # 만약 time_step이 1개라서 1D 배열(크기 3)로 추출되었다면 2D(3, 1)로 변경
-        if b_arr.ndim == 1: b_arr = b_arr.reshape(3, -1)
-        if r_arr.ndim == 1: r_arr = r_arr.reshape(3, -1)
-            
-        path_len = b_arr.shape[1]
-        
-        for t in range(path_len):
-            rows.append({
-                'subject_id': 0, # BToM은 피험자 0번(정답)으로 취급
-                'scenario_id': sc_id,
-                'time_step': t + 1,
-                'desire_K': r_arr[0, t],
-                'desire_L': r_arr[1, t],
-                'desire_M': r_arr[2, t],
-                'belief_L': b_arr[0, t],
-                'belief_M': b_arr[1, t],
-                'belief_Empty': b_arr[2, t],
-            })
-            
-    df_scores = pd.DataFrame(rows)
+    # 보기 좋게 확률을 소수점 3자리로 반올림
+    prob_cols = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
+    df_target[prob_cols] = df_target[prob_cols].round(3)
     
-    # 궤적 정보(df_btom)와 합쳐서 agent_x, agent_y 등을 가져옴
-    df_merged = pd.merge(df_btom, df_scores, on=['scenario_id', 'time_step'], how='inner')
-    
-    # LLM과 똑같은 기준으로 Phase 라벨링 수행
-    print("  -> Applying Phase Labeling to BToM Ground Truth...")
-    df_merged = apply_phase_labeling(df_merged)
-    
-    return df_merged
+    # CSV 저장
+    output_path = os.path.join(BASE_RESULTS_DIR, ref_model_name, f"{ref_model_name}_reverse_inference_experiment.csv")
+    df_target.to_csv(output_path, index=False)
+    print(f"\n✅ 추가 실험용 BToM 데이터가 성공적으로 저장되었습니다: {output_path}")
+    print(f"포함된 시나리오 수: {df_target['scenario_id'].nunique()}개")
 
 # =========================================================================
 # 메인 실행 래퍼 함수 (run_analysis.py에서 호출)
@@ -513,8 +450,16 @@ def run_prepare_everystep(model_name, condition):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="Model name (e.g., gpt-4o)")
-    parser.add_argument("--condition", type=str, required=True, help="Condition (e.g., vanilla, reasoning, oneshot)")
+    parser.add_argument("--model", type=str, required=False, default="dummy", help="Model name (e.g., gpt-4o)")
+    parser.add_argument("--condition", type=str, required=False, default="dummy", help="Condition (e.g., vanilla, reasoning, oneshot)")
+    # 💡 [수정] --ref 인자 추가
+    parser.add_argument("--ref", type=str, required=False, help="Reference model for generating experiment data (e.g., btom)")
     args = parser.parse_args()
 
-    run_prepare_everystep(args.model, args.condition)
+    # 일반적인 valid_only 구축
+    if args.model != "dummy" and args.condition != "dummy":
+        run_prepare_everystep(args.model, args.condition)
+
+    # 💡 --ref 인자가 들어왔을 때만 역방향 추론용 CSV 파일 추출 실행
+    if args.ref:
+        export_btom_experiment_data(args.ref)

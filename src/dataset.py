@@ -1,10 +1,19 @@
+import os
+import sys
 import scipy.io
 import numpy as np
 import pandas as pd
 
+# 1. 현재 스크립트(analysis 폴더)의 상위 경로를 파이썬 탐색 경로에 추가
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir) # 상위 폴더 (프로젝트 루트)
+
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
 # 공통 설정 가져오기
-from config import get_group_indices, BEHAVIOR_GROUPS, STIMULI_MAT_PATH
-from utils import get_clean_value
+from src.config import get_group_indices, BEHAVIOR_GROUPS, STIMULI_MAT_PATH
+from src.utils import get_clean_value
 
 def extract_btom_data(mat_file_path):
     try:
@@ -253,7 +262,6 @@ def extract_btom_data(mat_file_path):
         group_desc = BEHAVIOR_GROUPS.get(group_num, "Unknown")
 
         # 5. 데이터 저장 (Time Step별로 Row 생성)
-        # Tiny RNN 학습을 위해 매 시간(t)의 상태를 저장
         for t in range(len(path_x)):
             row = {
                 'scenario_id': scenario_id,
@@ -318,6 +326,43 @@ if __name__ == "__main__":
     # 전체 데이터 출력
     # print("=== Scenario 18 Full Data ===")
     # print(target_scenario)
+
+    print("\n==================================================")
+    print("🎯 MATLAB Hindsight 모델을 위한 t_vis 데이터 추출 시작...")
+    
+    # 1. 78개 시나리오의 t_vis를 담을 1차원 배열 생성 (기본값은 999로 설정)
+    # (MATLAB에서 inf 처리가 꼬일 수 있으므로, 도달 불가능한 큰 수 999를 사용합니다)
+    t_vis_array = np.full(78, 999, dtype=float)
+    
+    for sc_id in range(1, 79):
+        # 해당 시나리오 데이터만 필터링
+        sc_data = df_btom[df_btom['scenario_id'] == sc_id]
+        
+        # visible_goal2가 1인 행들만 찾기
+        vis_data = sc_data[sc_data['visible_goal2'] == 1]
+        
+        if not vis_data.empty:
+            # G2가 처음으로 보인 time_step 추출
+            first_vis_step = vis_data['time_step'].min()
+            t_vis_array[sc_id - 1] = first_vis_step
+            
+    # 2. 추출된 배열을 MATLAB이 읽을 수 있는 .mat 파일로 저장
+    import os
+    import scipy.io
+    
+    # 저장할 디렉토리 설정 (없으면 생성)
+    save_dir = "C:/Users/user/Documents/MATLAB/BToM_paper/data/hindsight"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    save_path = os.path.join(save_dir, "t_vis_data.mat")
+    
+    # 딕셔너리 형태로 저장 (MATLAB에서 't_vis_array'라는 변수명으로 로드됨)
+    scipy.io.savemat(save_path, {'t_vis_array': t_vis_array})
+    
+    print(f"✅ t_vis_array 추출 완료! (총 {len(t_vis_array)}개 시나리오)")
+    print(t_vis_array)
+    print(f"✅ 파일이 성공적으로 저장되었습니다: {save_path}")
+    print("==================================================\n")
 
 else:
     # 다른 파일에서 'import btom_dataset' 했을 때 실행됨

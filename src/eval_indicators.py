@@ -25,7 +25,7 @@ def calculate_bias_indicators(model_name, condition):
     # LLM과 BToM 데이터 병합
     score_cols = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
     btom_merge_cols = ['scenario_id', 'time_step'] + score_cols + \
-                      ['agent_x', 'agent_y', 'goal2_x', 'goal2_y', 'K_x', 'K_y', 'L_x', 'L_y', 'M_x', 'M_y', 'wall_start_x', 'wall_start_y', 'phase']
+                      ['agent_x', 'agent_y', 'goal2_x', 'goal2_y', 'K_x', 'K_y', 'L_x', 'L_y', 'M_x', 'M_y', 'wall_start_x', 'wall_start_y', 'wall_width', 'phase']
     
     # BToM 데이터에 is_irrational 컬럼이 있다면 포함, 없다면 제외하고 병합
     if 'is_irrational' in df_btom.columns:
@@ -63,7 +63,7 @@ def calculate_bias_indicators(model_name, condition):
         # 시나리오의 물리적 특성 추출
         path_length = t_end['time_step']
         start_x, start_y = t1['agent_x'], t1['agent_y']
-        wall_x, wall_y = t1['wall_start_x'], t1['wall_start_y']
+        wall_x, wall_y, wall_width = t1['wall_start_x'], t1['wall_start_y'], t1['wall_width']
         is_irrational = t1['is_irrational'] if 'is_irrational' in t1 else 0
         
         # 실제 G2 식별
@@ -143,18 +143,18 @@ def calculate_bias_indicators(model_name, condition):
         # -------------------------------------------------------------
         hb_target, hb_llm_pre, hb_llm_post, hb_btom_pre, hb_btom_post = [np.nan] * 5
         
-        if group_id not in [3, 5]: # NoCheck 제외
+        if group_id not in [2, 3, 5, 6]: # NoCheck 제외
             pass_g1 = group_data[group_data['phase'].str.contains('Pass G1', na=False)]
             see_g2 = group_data[group_data['phase'].str.contains('See', na=False)]
             return_g1 = group_data[group_data['phase'].str.contains('Return G1', na=False)]
             
-            if group_id in [1] and not see_g2.empty and not return_g1.empty:
-                # Check-GoBack (P)
+            # 예외: Check-GoBack (P) -> Group 1
+            if group_id == 1 and actual_g2 != 'Empty' and not see_g2.empty and not return_g1.empty:
                 hb_target = 'L'
                 pre_obs = see_g2.iloc[-1]
                 post_obs = return_g1.iloc[0]
+            # 일반: 그 외 (G4, G7 등)
             elif not pass_g1.empty and not see_g2.empty:
-                # 그 외
                 hb_target = 'Empty'
                 pre_obs = pass_g1.iloc[-1]
                 post_obs = see_g2.iloc[0]
@@ -170,25 +170,18 @@ def calculate_bias_indicators(model_name, condition):
         # -------------------------------------------------------------
         # 5. RationalConsistency (Pass G1 구간에서의 Expected Value와 TV)
         # -------------------------------------------------------------
-        rc_llm_ev_mean, rc_llm_dk_mean, rc_llm_ev_tv = np.nan, np.nan, np.nan
-        rc_btom_ev_mean, rc_btom_dk_mean, rc_btom_ev_tv = np.nan, np.nan, np.nan
+        rc_llm_violation_ratio = np.nan # 🌟 새롭게 추가될 변수
         
-        if group_id not in [3, 5]:
+        if group_id not in [3, 5]: # NoCheck 제외
             pass_g1_data = group_data[group_data['phase'].str.contains('Pass G1', na=False)]
             if not pass_g1_data.empty:
                 # LLM EV
                 llm_evs = (pass_g1_data['prob_L'] * pass_g1_data['desire_L']) + \
                           (pass_g1_data['prob_M'] * pass_g1_data['desire_M'])
-                rc_llm_ev_mean = llm_evs.mean()
-                rc_llm_dk_mean = pass_g1_data['desire_K'].mean()
-                rc_llm_ev_tv = calc_total_variation(llm_evs.values)
                 
-                # BToM EV (BToM 확률 * 1~7 스케일 Desire)
-                btom_evs = (pass_g1_data['prob_L_btom'] * pass_g1_data['desire_L_btom']) + \
-                           (pass_g1_data['prob_M_btom'] * pass_g1_data['desire_M_btom'])
-                rc_btom_ev_mean = btom_evs.mean()
-                rc_btom_dk_mean = pass_g1_data['desire_K_btom'].mean()
-                rc_btom_ev_tv = calc_total_variation(btom_evs.values)
+                # 🌟 K를 지나가고 있는데 EV(G2)가 Desire(K)보다 작거나 같으면 '비합리적 위반'
+                violations = (llm_evs <= pass_g1_data['desire_K']).sum()
+                rc_llm_violation_ratio = violations / len(pass_g1_data)
 
         # -------------------------------------------------------------
         # 6. ZeroSumBias (NoCheck 구간에서의 Desire L, M TV 및 Delta)
@@ -217,7 +210,7 @@ def calculate_bias_indicators(model_name, condition):
             
             # 물리적 환경 특성
             'path_length': path_length, 'start_x': start_x, 'start_y': start_y, 
-            'wall_x': wall_x, 'wall_y': wall_y, 'is_irrational': is_irrational, 'actual_g2': actual_g2,
+            'wall_x': wall_x, 'wall_y': wall_y, 'wall_width': wall_width, 'is_irrational': is_irrational, 'actual_g2': actual_g2,
             
             # 0. Baseline
             'base_kl_mean': base_kl_mean, 'base_desire_rmse': base_desire_rmse,
@@ -228,6 +221,7 @@ def calculate_bias_indicators(model_name, condition):
             # 2. NoCost
             'nc_effort_K': nc_effort_K, 'nc_effort_L': nc_effort_L, 'nc_effort_M': nc_effort_M,
             'nc_llm_des_K_end': t_end['desire_K'], 'nc_llm_des_L_end': t_end['desire_L'], 'nc_llm_des_M_end': t_end['desire_M'],
+            'nc_btom_des_K_end': t_end['desire_K_btom'], 'nc_btom_des_L_end': t_end['desire_L_btom'], 'nc_btom_des_M_end': t_end['desire_M_btom'],
             
             # 3. MotionHeuristic
             'mh_dist_G1': dist_g1, 'mh_dist_G2': dist_g2, 'mh_dist_diff': mh_dist_diff,
@@ -239,8 +233,7 @@ def calculate_bias_indicators(model_name, condition):
             'hb_btom_pre': hb_btom_pre, 'hb_btom_post': hb_btom_post,
             
             # 5. RationalConsistency
-            'rc_llm_ev_mean': rc_llm_ev_mean, 'rc_llm_dk_mean': rc_llm_dk_mean, 'rc_llm_ev_tv': rc_llm_ev_tv,
-            'rc_btom_ev_mean': rc_btom_ev_mean, 'rc_btom_dk_mean': rc_btom_dk_mean, 'rc_btom_ev_tv': rc_btom_ev_tv,
+            'rc_llm_violation_ratio': rc_llm_violation_ratio,
             
             # 6. ZeroSumBias
             'zs_llm_tv_L': zs_llm_tv_L, 'zs_llm_tv_M': zs_llm_tv_M,
@@ -257,4 +250,4 @@ def calculate_bias_indicators(model_name, condition):
     return df_results
 
 if __name__ == "__main__":
-    calculate_bias_indicators("gemini-2.5-flash", "vanilla")
+    calculate_bias_indicators("claude-sonnet-4-6", "vanilla")

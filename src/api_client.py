@@ -4,6 +4,10 @@ from openai import OpenAI
 import anthropic
 from dotenv import load_dotenv
 
+# gemini-3.5-flash 지원을 위한 Google GenAI 공식 SDK
+from google import genai
+from google.genai import types
+
 # ==============================================================================
 # 1. 실험 설정
 # ==============================================================================
@@ -12,18 +16,22 @@ TEMPERATURE = 0.7  # 다양성을 위해 0.0보다 높게 설정 (0.7 ~ 1.0 권�
 MAX_RETRIES = 5    # Rate Limit 발생 시 재시도 횟수
 
 # API 키 설정
-# 🌟 [추가] .env 파일에 있는 변수들을 시스템 환경변수로 등록
+# .env 파일에 있는 변수들을 시스템 환경변수로 등록
 load_dotenv()
 
-# 🌟 [수정] os.getenv()를 사용하여 .env에서 키를 안전하게 가져옵니다.
+# os.getenv()를 사용하여 .env에서 키를 안전하게 가져옵니다.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 client_gpt = OpenAI(api_key=OPENAI_API_KEY)
+
 client_gemini = OpenAI(api_key=GEMINI_API_KEY,
                  base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+# Gemini 3.5 전용 공식 클라이언트
+client_gemini_genai = genai.Client(api_key=GEMINI_API_KEY)
+
 client_deepseek = OpenAI(api_key=DEEPSEEK_API_KEY,
                          base_url="https://api.deepseek.com")
 client_claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -31,7 +39,7 @@ client_claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # ==============================================================================
 # 2. 실험 진행
 # ==============================================================================
-def call_model_api(model_name, system_prompt, user_prompt):
+def call_model_api(model_name, system_prompt, user_prompt, effort=None):
     """
     재시도 로직이 포함된 API 호출 함수
     """
@@ -39,23 +47,76 @@ def call_model_api(model_name, system_prompt, user_prompt):
     while retry_count < MAX_RETRIES:
         try:
             # ----------------------------------------
-            # CASE 1: OpenAI O1 Series (Reasoning Model)
+            # CASE 1-1: GPT Reasoning Models (gpt-5.4, o4-mini)
             # ----------------------------------------
-            if "o4" in model_name: 
-                # System Role 불가 -> User 프롬프트와 합침
-                # Temperature 파라미터 불가 (Default 1 고정)
-                combined_prompt = f"Instructions:\n{system_prompt}\n\nTask:\n{user_prompt}"
+            if "gpt-5.4" in model_name or "o4" in model_name:
+
+                # 기본 kwargs 설정 (responses.create 규격)
+                kwargs = {
+                    "model": model_name,
+                    "input": [
+                        {"role": "developer", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                }
                 
+                # effort 파라미터가 명시적으로 전달된 경우 처리
+                if effort:
+                    # o4-mini 모델인데 none이 들어온 경우 low로 강제 다운그레이드 (에러 방지)
+                    if "o4-mini" in model_name and effort == "none":
+                        print("\n⚠️ [Warning] o4-mini는 'none' effort를 지원하지 않으므로 'low'로 강제 조정합니다.")
+                        kwargs["reasoning"] = {"effort": "low"}
+                    else:
+                        kwargs["reasoning"] = {"effort": effort}
+
+                # 새로운 responses.create 엔드포인트 사용
+                response = client_gpt.responses.create(**kwargs)
+
+                return response.output_text
+
+            # ----------------------------------------
+            # CASE 1-2: GPT Standard (gpt-4o)
+            # ----------------------------------------
+            elif "gpt-4o" in model_name:
                 response = client_gpt.chat.completions.create(
                     model=model_name,
-                    messages=[{"role": "user", "content": combined_prompt}],
-                    # temperature=1, # o1은 지원 안함
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=TEMPERATURE,
                     response_format={"type": "json_object"}
                 )
                 return response.choices[0].message.content
 
             # ----------------------------------------
-            # CASE 2: Gemini Series
+            # CASE 2-1: Gemini 3.5 Series (공식 SDK 사용)
+            # ----------------------------------------
+            elif "gemini-3.5" in model_name:
+                # 3.5부터는 temperature 등 샘플링 매개변수가 권장되지 않으므로 생략하고 기본값 사용
+                config_kwargs = {
+                    "system_instruction": system_prompt,
+                    "response_mime_type": "application/json"
+                }
+
+                # effort가 전달된 경우 3.5의 새로운 추론 설정인 thinking_level로 매핑
+                if effort and effort != "none":
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_level=effort  # "low", "medium", "high" 등 지원
+                    )
+
+                config = types.GenerateContentConfig(**config_kwargs)
+
+                # 새로운 공식 SDK 메서드 사용
+                response = client_gemini_genai.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=config
+                )
+                return response.text
+
+            # ----------------------------------------
+            # CASE 2-2: 기존 Gemini Series (OpenAI 호환 API 유지)
             # ----------------------------------------
             elif "gemini" in model_name:
                 response = client_gemini.chat.completions.create(
@@ -68,24 +129,9 @@ def call_model_api(model_name, system_prompt, user_prompt):
                     response_format={"type": "json_object"}
                 )
                 return response.choices[0].message.content
-
-            # ----------------------------------------
-            # CASE 3: GPT Standard (4o, 4-turbo, 3.5)
-            # ----------------------------------------
-            elif "gpt" in model_name:
-                response = client_gpt.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=TEMPERATURE,
-                    response_format={"type": "json_object"}
-                )
-                return response.choices[0].message.content
             
             # ----------------------------------------
-            # CASE 4: Deepseek Series
+            # CASE 3: Deepseek Series
             # ----------------------------------------
             elif "deepseek" in model_name:
                 # 1. API 호출용 기본 파라미터 구성
@@ -109,9 +155,44 @@ def call_model_api(model_name, system_prompt, user_prompt):
                 return response.choices[0].message.content
             
             # ----------------------------------------
-            # CASE 5: Claude Series
+            # CASE 4-1: Claude Reasoning Series
             # ----------------------------------------
-            elif "claude" in model_name:
+            elif "claude-opus" in model_name:
+                # 1. thinking 토큰 용량을 고려하여 max_tokens를 16000 이상으로 넉넉하게 설정합니다.
+                # 2. adaptive thinking 모드 활성화 시 temperature는 반드시 1.0 이어야 합니다.
+                thinking_config = {"type": "adaptive"}
+                
+                response = client_claude.messages.create(
+                    model=model_name,
+                    max_tokens=16000,
+                    system=system_prompt,
+                    messages=[
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=1.0,
+                    thinking=thinking_config
+                )
+                
+                # response.content 배열을 돌면서 각각의 블록을 추출합니다.
+                thinking_content = ""
+                text_content = ""
+                
+                for block in response.content:
+                    if block.type == "thinking":
+                        thinking_content += block.thinking
+                    elif block.type == "text":
+                        text_content += block.text
+
+                # utils.py에서 두 정보를 한 번에 매핑할 수 있도록 딕셔너리로 반환합니다.
+                return {
+                    "thinking": thinking_content,
+                    "text": text_content
+                }
+            
+            # ----------------------------------------
+            # CASE 4-2: Claude Series
+            # ----------------------------------------
+            elif "claude-sonnet" in model_name:                
                 response = client_claude.messages.create(
                     model=model_name,
                     max_tokens=4000,
@@ -124,7 +205,7 @@ def call_model_api(model_name, system_prompt, user_prompt):
                 return response.content[0].text
 
             # ----------------------------------------
-            # CASE 6: 지원하지 않는 모델 방어 로직
+            # CASE 5: 지원하지 않는 모델 방어 로직
             # ----------------------------------------
             else:
                 print(f"\n[Error] Unsupported model: {model_name}")

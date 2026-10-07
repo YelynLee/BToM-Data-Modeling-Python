@@ -13,7 +13,7 @@ def resolve_pkl_path(name, condition, mode):
     name_lower = name.lower()
     if name_lower == "human":
         return HUMAN_PKL_PATH
-    elif name_lower in ["btom", "truebelief", "nocost", "motionheuristic"]:
+    elif name_lower in ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]:
         return os.path.join(REFERENCE_PKL_DIR, name_lower, f"{name_lower}_data.pkl")
     else:
         if mode == "everystep":
@@ -26,7 +26,7 @@ def get_base_dir(name, condition, mode):
     Target 모델이 btom이나 human일 경우 condition 폴더 없이 최상위에 저장합니다.
     """
     name_lower = name.lower()
-    if name_lower in ["human", "btom", "truebelief", "nocost", "motionheuristic"]:
+    if name_lower in ["human", "btom", "truebelief", "nocost", "motionheuristic", "hindsight"]:
         return os.path.join(BASE_RESULTS_DIR, name_lower)
     else:
         if mode == "everystep":
@@ -34,9 +34,9 @@ def get_base_dir(name, condition, mode):
         else:
             return os.path.join(BASE_RESULTS_DIR, name_lower, condition)
 
-def run_analysis(model_name, condition, mode, baseline="human", analysis_type="all"):
+def run_analysis(model_name, condition, mode, baseline="human", analysis_type="all", enable_vpa=False):
     print(f"🚀 분석 시작: Target=[{model_name}], Baseline=[{baseline.upper()}]")
-    if model_name.lower() not in ["human", "btom"]:
+    if model_name.lower() not in ["human", "btom", "truebelief", "nocost", "motionheuristic", "hindsight"]:
         print(f"   -> Cond=[{condition}], Mode=[{mode}], Type=[{analysis_type.upper()}]")
     
     # 1. 경로 자동 설정
@@ -96,14 +96,21 @@ def run_analysis(model_name, condition, mode, baseline="human", analysis_type="a
         if mode == "everystep":
             print("\n--- [5] Drawing Phase Trajectory Plots (Everystep Only) ---")
             
-            # 1. 데이터 전처리 및 완벽한 피험자(Perfect Subjects) 동적 추출
-            selected_subjects = run_prepare_everystep(model_name, condition)
+            ref_models = ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]
             
-            if not selected_subjects:
-                print("❌ Error: 선별된 피험자가 없습니다. Phase Plot을 그릴 수 없습니다.")
+            # 인지 모델일 경우: 전처리(prepare) 스킵, 피험자 [0]으로 고정하여 즉시 플롯
+            if model_name.lower() in ref_models:
+                print(f"  -> Drawing Everystep Plots for Reference Model: {model_name.upper()}")
+                run_plot_everystep(model_name, condition, target_subjects=[0], output_dir=base_dir, enable_vpa=enable_vpa)
+            
+            # LLM일 경우: CSV 전처리 후 우등생 피험자 선별하여 플롯
             else:
-                print(f"  -> Drawing Everystep Plots for Selected Subjects: {selected_subjects}")
-                run_plot_everystep(model_name, condition, selected_subjects)
+                selected_subjects = run_prepare_everystep(model_name, condition)
+                if not selected_subjects:
+                    print("❌ Error: 선별된 피험자가 없습니다. Phase Plot을 그릴 수 없습니다.")
+                else:
+                    print(f"  -> Drawing Everystep Plots for Selected Subjects: {selected_subjects}")
+                    run_plot_everystep(model_name, condition, selected_subjects, output_dir=base_dir, enable_vpa=enable_vpa)
                 
         else:
             # 사용자가 normal 모드인데 강제로 --type phase를 요청한 경우 방어
@@ -118,7 +125,7 @@ if __name__ == "__main__":
     # model 인자는 그대로 두되, btom이나 human일 때는 뒤의 condition을 굳이 치지 않아도 됩니다.
     parser.add_argument("--model", type=str, required=True, help="Target model (e.g., gpt-4o, btom, human)")
     parser.add_argument("--baseline", type=str, default="human", 
-                        choices=["human", "btom", "truebelief", "nocost", "motionheuristic"], help="Baseline to compare against (default: human)")
+                        choices=["human", "btom", "truebelief", "nocost", "motionheuristic", "hindsight"], help="Baseline to compare against (default: human)")
     
     # condition의 default를 세팅해두면 굳이 타이핑 안 해도 에러가 나지 않습니다.
     parser.add_argument("--condition", type=str, default="vanilla", 
@@ -130,6 +137,9 @@ if __name__ == "__main__":
     parser.add_argument("--type", type=str, default="all",
                         choices=["all", "bar", "scatter", "rmse", "rsa", "phase"],
                         help="Specific analysis to run (default: all)")
+    parser.add_argument("--vpa", action="store_true",
+                        help="Enable VPA overlays for everystep phase plots")
+
     args = parser.parse_args()
     
-    run_analysis(args.model, args.condition, args.mode, args.baseline, args.type)
+    run_analysis(args.model, args.condition, args.mode, args.baseline, args.type, args.vpa)
