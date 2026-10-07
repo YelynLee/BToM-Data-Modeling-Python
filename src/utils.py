@@ -82,6 +82,8 @@ def _belief_now_cols(now):
         'belief_now_L': now.get('L'),
         'belief_now_M': now.get('M'),
         'belief_now_Empty': now.get('Empty'),
+        # 모델이 now 블록에 적어 보낸 time_step (질문한 시점과 맞는지 점검용)
+        'belief_now_ts': now.get('time_step'),
     }
 
 

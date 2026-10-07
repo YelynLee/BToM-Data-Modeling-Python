@@ -30,17 +30,25 @@ STEPWISE_MODES = ("everystep", "prefixstep")
 SUBFOLDER_MODES = ("everystep", "prefixstep", "reverse", "control")
 
 
-def mode_folder(mode, current_belief=False, mask_hidden=False):
+def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=False):
     """
     실험 변형까지 반영한 하위 폴더 이름을 반환함.
-      everystep                      -> 'everystep'
-      prefixstep + current_belief    -> 'prefixstep_cur'
+      everystep + legacy_wording     -> 'everystep'        (논문에 쓴 기존 Every-step 결과 폴더)
+      everystep (새 문구, 기본값)    -> 'everystep_upto'   (기존 결과와 섞이지 않도록 분리)
+      everystep + current_belief     -> 'everystep_upto_cur'
+      prefixstep (기본값)            -> 'prefixstep'
+      prefixstep + legacy_wording    -> 'prefixstep_legacy'
       prefixstep + mask_hidden + cur -> 'prefixstep_mask_cur'
-      normal                         -> ''  (condition 폴더 바로 아래)
+      normal                         -> ''  (condition 폴더 바로 아래, 문구 변경 없음)
     """
     if mode not in SUBFOLDER_MODES:
         return ""
     name = mode
+    # belief 문구 버전 ('only given the information up to step t')
+    if mode == "everystep" and not legacy_wording:
+        name += "_upto"
+    elif mode == "prefixstep" and legacy_wording:
+        name += "_legacy"
     if mask_hidden:
         name += "_mask"
     if current_belief:
