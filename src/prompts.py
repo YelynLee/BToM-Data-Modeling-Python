@@ -172,34 +172,73 @@ Time Step 8: Agent at (1, 1) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is
 ]
 """
 
-def _belief_now_text(options_str, stepwise):
-    """[current_belief] 에이전트 '현재' 믿음 질문 문구. initial 질문과 구조를 맞춰 대조가 쉽게 함."""
-    if stepwise:
-        return (f"At EVERY time step, rate the student's current belief: the likelihood the student assigns, "
-                f"at that time step, to {options_str} being in Spot 2, given only what the student has seen up to that step.")
-    return (f"At the LAST time step, rate the student's current belief: the likelihood the student assigns, "
-            f"at that moment, to {options_str} being in Spot 2, given only what the student has seen so far.")
+def _belief_texts(mode, options_str, t_last, legacy_wording):
+    """
+    belief 질문 문구와 JSON 필드 앞부분(time_step)을 반환.
+      Returns: initial_text, now_text, initial_ts, now_ts
+        initial_ts / now_ts: JSON 블록 안에 넣을 "time_step" 값 (None이면 넣지 않음)
+
+    - normal(End-step): 사람 실험과 비교되는 조건이라 문구를 절대 바꾸지 않음.
+    - prefixstep / everystep: 정보의 끝 범위를 'up to step t'로 명시해 두 조건의 문구를 통일.
+      initial과 now 질문도 같은 문장 구조를 쓰고, 묻는 시점(t=1 vs t)만 다르게 함.
+    - legacy_wording=True: 이번 수정 이전의 문구 (기존 Every-step 결과 재현용).
+    """
+    if mode == 'normal' or (mode == 'prefixstep' and legacy_wording):
+        initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
+                   f"being in the occluded spot at t=1.")
+        now = (f"At the LAST time step, rate the student's current belief: the likelihood the student assigns, "
+               f"at that moment, to {options_str} being in Spot 2, given only what the student has seen so far.")
+        return initial, now, 1, None
+
+    if mode == 'prefixstep':
+        initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
+                   f"being in the occluded spot at t=1, only given the information up to step {t_last}.")
+        now = (f"At the LAST time step, rate the student's likelihood for {options_str} "
+               f"being in Spot 2 at t={t_last}, only given the information up to step {t_last}.")
+        return initial, now, 1, t_last
+
+    # everystep: 한 번의 응답 안에서 t가 바뀌므로 각 entry의 time_step을 t로 지칭
+    if legacy_wording:
+        initial = (f"At EVERY time step, rate the student's likelihood for {options_str} "
+                   f"being in the occluded spot at t=1 only given the current information.")
+        now = (f"At EVERY time step, rate the student's current belief: the likelihood the student assigns, "
+               f"at that time step, to {options_str} being in Spot 2, given only what the student has seen up to that step.")
+        return initial, now, None, None
+    initial = (f"At EVERY time step t, rate the student's likelihood for {options_str} "
+               f"being in the occluded spot at t=1, only given the information up to step t.")
+    now = (f"At EVERY time step t, rate the student's likelihood for {options_str} "
+           f"being in Spot 2 at t, only given the information up to step t.")
+    # JSON 예시는 time_step 1 entry이므로 now 블록의 time_step도 1로 표기
+    # (current_belief일 때만 블록 안에 time_step을 넣음; 아래 _build_belief_block 참고)
+    return initial, now, 1, 1
 
 
 def _build_belief_block(initial_text, now_text, json_fields, current_belief, belief_order,
-                        initial_time_step_field, json_indent):
+                        initial_ts, now_ts, json_indent, keep_legacy_json=False):
     """
     belief 질문 문구(번호 2, 3)와 JSON 필드 문자열을 반환.
-    current_belief=False면 기존 문구/키('belief_scores')를 그대로 돌려줌.
+    current_belief=False면 기존 키('belief_scores') 하나만 씀.
+    initial_ts / now_ts: 각 belief 블록 안에 "time_step": 값을 넣어 응답 시점을 다시 짚어줌.
+    keep_legacy_json: True면 단일 belief 블록에 time_step을 넣지 않음 (기존 everystep JSON 형식).
     """
     scale = "(Scale: 1 = Definitely not there to 7 = Definitely there)"
-    init_fields = f'"time_step": 1, {json_fields}' if initial_time_step_field else json_fields
+
+    def fields(ts):
+        return f'"time_step": {ts}, {json_fields}' if ts is not None else json_fields
 
     if not current_belief:
         questions = f"""2. {initial_text}
             {scale}"""
-        json_part = f'"belief_scores": {{ {init_fields} }}'
+        json_part = f'"belief_scores": {{ {fields(None if keep_legacy_json else initial_ts)} }}'
         return questions, json_part
 
-    items = [("initial", initial_text, f'"belief_initial_scores": {{ {init_fields} }}'),
-             ("now", now_text, f'"belief_now_scores": {{ {json_fields} }}')]
+    items = [("initial", initial_text, f'"belief_initial_scores": {{ {fields(initial_ts)} }}'),
+             ("now", now_text, f'"belief_now_scores": {{ {fields(now_ts)} }}')]
     if belief_order == "now_first":
         items.reverse()
+    elif belief_order != "initial_first":
+        raise ValueError(f"belief_order must be 'initial_first' or 'now_first' (got {belief_order!r}); "
+                         f"'random'은 main_experiment.py에서 호출마다 둘 중 하나로 정해서 넘김")
 
     questions = "\n\n        ".join(
         f"""{i}. {text}
@@ -210,7 +249,7 @@ def _build_belief_block(initial_text, now_text, json_fields, current_belief, bel
 
 def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
                              current_belief=False, belief_order='initial_first',
-                             mask_hidden=False):
+                             mask_hidden=False, legacy_wording=False):
     """
     Args:
         df_scenario: 시나리오 데이터프레임.
@@ -220,9 +259,12 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
             - prefixstep: 잘린 로그에 End-step(normal)과 동일한 질문을 던짐.
         current_belief: True면 initial belief(t=1)와 함께 에이전트의 '현재' belief를 따로 물음.
             JSON 키가 'belief_initial_scores' / 'belief_now_scores'로 나뉨.
-        belief_order: 'initial_first' | 'now_first' (두 belief 질문의 제시 순서, counterbalance용)
+        belief_order: 'initial_first' | 'now_first' (두 belief 질문의 제시 순서).
+            main_experiment.py의 기본값 'random'은 호출마다 이 둘 중 하나로 정해져서 넘어옴.
         mask_hidden: True면 Map Configuration에서 Spot 2의 트럭 정체를 숨기고,
             로그에서 Spot 2가 보일 때만 관찰 내용을 알려줌.
+        legacy_wording: True면 everystep / prefixstep의 belief 문구를 이번 수정 이전 것으로 사용
+            (기존 Every-step 결과와 동일한 프롬프트 재현용). normal(End-step)은 항상 원래 문구.
     Returns:
         system_prompt, user_prompt
     """
@@ -429,10 +471,12 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
     # [1] Mode: Everystep (신규 방식 - 모든 스텝 분석)
     if mode == 'everystep':
         system_prompt = SYSTEM_PROMPT_EVERY
+        init_txt, now_txt, init_ts, now_ts = _belief_texts('everystep', options_str, max_steps, legacy_wording)
         belief_questions, belief_json = _build_belief_block(
-            f"At EVERY time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1 only given the current information.",
-            _belief_now_text(options_str, stepwise=True),
-            json_fields, current_belief, belief_order, initial_time_step_field=False, json_indent=16)
+            init_txt, now_txt, json_fields, current_belief, belief_order,
+            initial_ts=None if legacy_wording else init_ts,
+            now_ts=None if legacy_wording else now_ts,
+            json_indent=16, keep_legacy_json=True)
 
         prefix = ""
         if condition == "oneshot":
@@ -483,10 +527,12 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
     #     Prefixstep도 여기로 옴: 로그가 1..t로 잘려 있을 뿐 질문은 End-step과 동일
     else:
         system_prompt = SYSTEM_PROMPT_BASE
+        # prefixstep이면 df_scenario가 1..t로 잘려 있으므로 max_steps = t
+        init_txt, now_txt, init_ts, now_ts = _belief_texts(mode if mode == 'prefixstep' else 'normal',
+                                                           options_str, max_steps, legacy_wording)
         belief_questions, belief_json = _build_belief_block(
-            f"At the FIRST time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.",
-            _belief_now_text(options_str, stepwise=False),
-            json_fields, current_belief, belief_order, initial_time_step_field=True, json_indent=12)
+            init_txt, now_txt, json_fields, current_belief, belief_order,
+            initial_ts=init_ts, now_ts=now_ts, json_indent=12)
 
         prefix = ""
         if condition == "oneshot":

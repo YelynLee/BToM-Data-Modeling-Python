@@ -346,6 +346,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep", "prefixstep"], help="Analysis mode")
     parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과 폴더(*_cur)를 처리")
     parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과 폴더(*_mask)를 처리")
+    parser.add_argument("--legacy_wording", action="store_true", help="기존 belief 문구로 돌린 결과 폴더를 처리 (everystep -> 'everystep')")
     
     # 레퍼런스(논문 원본) 데이터 변환 플래그
     parser.add_argument("--ref_only", action="store_true", help="Convert reference data (MAT/R) to PKL")
@@ -391,7 +392,7 @@ if __name__ == "__main__":
 
         # 경로 조합 로직 (main_experiment.py와 동일)
         target_dir = result_dir(args.model, args.condition,
-                                mode_folder(args.mode, args.current_belief, args.mask_hidden))
+                                mode_folder(args.mode, args.current_belief, args.mask_hidden, args.legacy_wording))
             
         print(f"💡 Task: Process Model Data (CSV -> PKL)")
         print(f"📂 Target Directory: {target_dir}")

@@ -130,9 +130,13 @@ python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenario_i
 # Prefix-step: (scenario, t)마다 로그를 1..t로 잘라 End-step과 동일한 질문 -> results/{model}/vanilla/prefixstep/
 python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenarios check --subjects 8
 
-# Every-step / Prefix-step에서 initial belief와 현재(current) belief를 함께 질문 -> .../everystep_cur/, .../prefixstep_cur/
+# Every-step / Prefix-step에서 initial belief와 현재(current) belief를 함께 질문 (질문 순서는 호출마다 무작위)
+#   -> .../everystep_upto_cur/, .../prefixstep_cur/
 python main_experiment.py --model claude-opus-4-6 --mode everystep --current_belief --scenarios check
-python main_experiment.py --model claude-opus-4-6 --mode prefixstep --current_belief --belief_order now_first --scenarios check
+python main_experiment.py --model claude-opus-4-6 --mode prefixstep --current_belief --scenarios check
+
+# 논문에 쓴 기존 Every-step 문구 그대로 재현 -> .../everystep/
+python main_experiment.py --model claude-opus-4-6 --mode everystep --legacy_wording
 
 # 후처리 / 분석도 같은 플래그로 폴더를 찾음
 python src/data_processor.py --model claude-opus-4-6 --condition vanilla --mode prefixstep --current_belief
@@ -145,9 +149,12 @@ python run_analysis.py --model claude-opus-4-6 --mode prefixstep --current_belie
 | `--scenarios check` | Check-GoBack / Check-Stay / Check-Partial 55개 시나리오만 (irrational 경로 제외) |
 | `--scenario_ids 1,6,40` | 지정한 시나리오만 (`--scenarios`보다 우선) |
 | `--current_belief` | initial belief(t=1)와 에이전트의 현재 belief를 따로 질문. CSV에 `belief_now_*` 컬럼 추가 |
-| `--belief_order` | `initial_first`(기본) / `now_first`: 두 belief 질문의 제시 순서 (counterbalance) |
+| `--belief_order` | `random`(기본) / `initial_first` / `now_first`: 두 belief 질문의 제시 순서. random은 (seed, subject, scenario, t)로 시드를 고정해 호출마다 정하고 CSV `belief_order` 컬럼에 기록 |
+| `--legacy_wording` | everystep / prefixstep의 belief 문구를 이전 버전으로 사용. 기본 문구는 `only given the information up to step t` |
 | `--mask_hidden` | Map Configuration에서 Spot 2의 트럭 정체를 숨김 (Spot 2가 보일 때만 로그로 드러남) |
 | `--preview` | API 호출 없이 생성될 프롬프트만 출력 |
+
+결과 폴더: Every-step은 새 문구(기본)일 때 `everystep_upto[_cur]`, `--legacy_wording`일 때 기존 `everystep`에 저장되어 논문 데이터와 섞이지 않습니다. End-step(normal) 문구는 바뀌지 않았습니다.
 
 체크포인트는 작업 단위(시나리오, prefixstep은 (시나리오, t))마다 저장되므로 중간에 끊겨도 같은 명령으로 이어서 실행됩니다.
 

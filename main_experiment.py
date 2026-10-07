@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import random
 import argparse
 import pandas as pd
 from tqdm import tqdm
@@ -57,6 +58,18 @@ def make_meta(group_df):
         'group_desc': group_df.get('group_desc', pd.Series(["Unknown"])).iloc[0],
         'truck_presence': " and ".join(present_trucks) + " present" if present_trucks else "No trucks present"
     }
+
+
+def resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, seed=0):
+    """
+    두 belief 질문의 제시 순서를 정함.
+    'random'이면 (seed, subject, scenario, t)로 시드를 고정한 난수로 호출마다 정하므로
+    같은 명령을 다시 실행하거나 중간에 재개해도 같은 호출은 같은 순서를 받음.
+    """
+    if belief_order != "random":
+        return belief_order
+    rng = random.Random(f"{seed}-{subject_idx}-{sc_id}-{t_cut}")
+    return rng.choice(["initial_first", "now_first"])
 
 
 # =========================================================================
@@ -147,23 +160,27 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
 # =========================================================================
 def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, version="",
                    scenarios="all", scenario_ids=None, current_belief=False,
-                   belief_order="initial_first", mask_hidden=False, preview=False):
+                   belief_order="random", mask_hidden=False, preview=False,
+                   legacy_wording=False, order_seed=0):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
     # 💡 condition과 version을 결합한 새로운 디렉토리 이름 생성 (예: vanilla + 2 = vanilla2)
     condition_folder = f"{condition}{version}"
 
-    prompt_kwargs = dict(current_belief=current_belief, belief_order=belief_order, mask_hidden=mask_hidden)
+    # belief_order는 호출마다 정해지므로 여기서는 빼고, 호출 직전에 넣음
+    prompt_kwargs = dict(current_belief=current_belief, mask_hidden=mask_hidden, legacy_wording=legacy_wording)
 
     print(f"🚀 실험 시작: Model=[{model_name}], Condition=[{condition_folder}], Mode=[{mode}], "
           f"Subjects=[{num_subjects}]{effort_log}")
     if current_belief or mask_hidden:
         print(f"   -> current_belief={current_belief} (order={belief_order}), mask_hidden={mask_hidden}")
+    if mode in STEPWISE_MODES:
+        print(f"   -> belief wording: {'legacy (기존 문구)' if legacy_wording else 'only given the information up to step t'}")
 
     # 저장 경로: results/{model}/{condition}[/{mode_folder}][/effort_x]
     # 예) results/gpt-4o/vanilla/prefixstep_cur/
-    sub = mode_folder(mode, current_belief, mask_hidden)
+    sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording)
     base_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition_folder, sub) if sub \
         else os.path.join(BASE_RESULTS_DIR, model_name, condition_folder)
     save_dir = os.path.join(base_dir, f"effort_{effort}") if effort else base_dir
@@ -202,9 +219,13 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
         else:
             show = units[:1]
         for key, sc_id, t_cut, df_input in show:
-            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, **prompt_kwargs)
+            order = resolve_belief_order(belief_order, 1, sc_id, t_cut, order_seed)
+            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode,
+                                                               belief_order=order, **prompt_kwargs)
             print("=" * 70)
-            print(f"[Preview] scenario {sc_id}" + (f", t = {t_cut}" if t_cut else ""))
+            print(f"[Preview] scenario {sc_id}" + (f", t = {t_cut}" if t_cut else "")
+                  + (f", belief order = {order}" if current_belief else "")
+                  + f"  -> {save_dir}")
             print("-" * 70 + "\n[System]\n" + sys_prompt.strip())
             print("-" * 70 + "\n[User]\n" + user_prompt.strip())
         print("=" * 70 + "\n(preview 모드: API를 호출하지 않았습니다)")
@@ -237,7 +258,9 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
             meta = make_meta(df_input)
 
             # 프롬프트 생성 (prefixstep이면 df_input이 1..t로 잘려 있음)
-            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, **prompt_kwargs)
+            order = resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, order_seed)
+            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode,
+                                                               belief_order=order, **prompt_kwargs)
 
             # 모델 호출
             response_str = call_model_api(model_name, sys_prompt, user_prompt, effort=effort)
@@ -249,6 +272,10 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
                     print(f"\n⚠️ [Parsing Error] {tag}: {rows[0]['error']}")
             else:
                 rows = [{'scenario_id': sc_id, 'time_step': t_cut, 'error': 'API Fail', 'model': model_name}]
+
+            if current_belief:
+                for r in rows:
+                    r['belief_order'] = order  # 분석에서 순서 효과를 확인할 수 있도록 기록
 
             results[key] = rows
             save_rows(results, filename)  # 작업 단위마다 저장 -> 중간에 끊겨도 이어서 진행 가능
@@ -291,8 +318,11 @@ if __name__ == "__main__":
     # 실험 변형
     parser.add_argument("--current_belief", action="store_true",
                         help="initial belief(t=1)와 함께 에이전트의 현재 belief를 따로 질문 (everystep / prefixstep)")
-    parser.add_argument("--belief_order", type=str, default="initial_first", choices=["initial_first", "now_first"],
-                        help="--current_belief일 때 두 belief 질문의 제시 순서")
+    parser.add_argument("--belief_order", type=str, default="random", choices=["random", "initial_first", "now_first"],
+                        help="--current_belief일 때 두 belief 질문의 제시 순서. random(기본): 호출마다 무작위(시드 고정), CSV의 belief_order 컬럼에 기록")
+    parser.add_argument("--order_seed", type=int, default=0, help="belief_order=random의 시드")
+    parser.add_argument("--legacy_wording", action="store_true",
+                        help="everystep / prefixstep belief 문구를 수정 이전 것으로 사용 (기존 Every-step 결과 재현; 결과 폴더 'everystep')")
     parser.add_argument("--mask_hidden", action="store_true",
                         help="Map Configuration에서 Spot 2의 트럭 정체를 숨김 (Spot 2가 보일 때만 로그로 드러남)")
 
@@ -312,4 +342,5 @@ if __name__ == "__main__":
 
     run_experiment(args.model, args.condition, args.mode, args.subjects, args.effort, args.version,
                    scenarios=args.scenarios, scenario_ids=ids, current_belief=args.current_belief,
-                   belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview)
+                   belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
+                   legacy_wording=args.legacy_wording, order_seed=args.order_seed)
