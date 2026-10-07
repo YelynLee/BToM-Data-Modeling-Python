@@ -1,3 +1,5 @@
+import os
+
 # =========================================================================
 # 저장 경로 설정
 # =========================================================================
@@ -14,6 +16,70 @@ REFERENCE_PKL_DIR = "data"
 
 # Stimuli Data 원본 경로
 STIMULI_MAT_PATH = "data/stimuli.mat"
+
+# =========================================================================
+# 실험 Mode / 결과 폴더 규칙
+# =========================================================================
+# 시점별(stepwise) 응답을 내는 mode. 행 단위가 (scenario_id, time_step)이며
+# phase labeling, valid_only 구축 등 everystep 파이프라인을 그대로 공유함.
+#   - everystep : 전체 궤적을 한 번에 주고 매 스텝 응답을 받음 (기존)
+#   - prefixstep: t마다 독립 호출, 로그를 1..t로 잘라서 End-step 질문을 그대로 던짐
+STEPWISE_MODES = ("everystep", "prefixstep")
+
+# 결과를 하위 폴더에 따로 저장하는 mode (normal은 condition 폴더 바로 아래)
+SUBFOLDER_MODES = ("everystep", "prefixstep", "reverse", "control")
+
+
+def mode_folder(mode, current_belief=False, mask_hidden=False):
+    """
+    실험 변형까지 반영한 하위 폴더 이름을 반환함.
+      everystep                      -> 'everystep'
+      prefixstep + current_belief    -> 'prefixstep_cur'
+      prefixstep + mask_hidden + cur -> 'prefixstep_mask_cur'
+      normal                         -> ''  (condition 폴더 바로 아래)
+    """
+    if mode not in SUBFOLDER_MODES:
+        return ""
+    name = mode
+    if mask_hidden:
+        name += "_mask"
+    if current_belief:
+        name += "_cur"
+    return name
+
+
+def base_mode(mode_dir):
+    """'prefixstep_mask_cur' 같은 폴더 이름에서 기본 mode('prefixstep')를 꺼냄."""
+    return mode_dir.split("_")[0] if mode_dir else "normal"
+
+
+def result_dir(model_name, condition, mode_dir=""):
+    """results/{model}/{condition}[/{mode_dir}]"""
+    if mode_dir:
+        return os.path.join(BASE_RESULTS_DIR, model_name, condition, mode_dir)
+    return os.path.join(BASE_RESULTS_DIR, model_name, condition)
+
+
+# Check 계열(에이전트가 G2를 확인하러 가는) 시나리오 그룹:
+#   G1 Check-GoBack(Present), G2 Check-Stay(Present), G4 Check-GoBack(Absent),
+#   G6 CheckPartial(Present), G7 CheckPartial(Absent)
+CHECK_GROUP_IDS = (1, 2, 4, 6, 7)
+
+
+def get_scenario_subset(subset="all", include_irrational=False):
+    """
+    API를 돌릴 scenario_id 집합을 반환함.
+      'all'  : 78개 전체 (기존 동작, irrational 포함)
+      'check': Check-GoBack / Check-Stay / Check-Partial만. 분석에서 어차피 제외되는
+               irrational 경로(11, 12, 22, 71, 72)는 기본적으로 빼서 비용을 줄임.
+    """
+    if subset == "all":
+        return None  # 필터 없음
+    if subset == "check":
+        groups = get_group_indices(include_irrational=include_irrational)
+        return sorted(sid for gid in CHECK_GROUP_IDS for sid in groups[gid - 1])
+    raise ValueError(f"Unknown scenario subset: {subset}")
+
 
 # =========================================================================
 # 행동 그룹 정의 (Labeling용)

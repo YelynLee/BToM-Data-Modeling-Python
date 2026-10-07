@@ -122,6 +122,36 @@ python main_experiment.py --model gpt-4o --condition oneshot --mode normal --sub
 ```
 
 
+- Stepwise variants (Prefix-step / current belief), enter:
+```bash
+# 프롬프트만 미리 확인 (API 호출 없음)
+python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenario_ids 1 --current_belief --preview
+
+# Prefix-step: (scenario, t)마다 로그를 1..t로 잘라 End-step과 동일한 질문 -> results/{model}/vanilla/prefixstep/
+python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenarios check --subjects 8
+
+# Every-step / Prefix-step에서 initial belief와 현재(current) belief를 함께 질문 -> .../everystep_cur/, .../prefixstep_cur/
+python main_experiment.py --model claude-opus-4-6 --mode everystep --current_belief --scenarios check
+python main_experiment.py --model claude-opus-4-6 --mode prefixstep --current_belief --belief_order now_first --scenarios check
+
+# 후처리 / 분석도 같은 플래그로 폴더를 찾음
+python src/data_processor.py --model claude-opus-4-6 --condition vanilla --mode prefixstep --current_belief
+python run_analysis.py --model claude-opus-4-6 --mode prefixstep --current_belief --type phase
+```
+
+| Argument (main_experiment.py) | Description |
+| :--- | :--- |
+| `--mode prefixstep` | (scenario, t)마다 독립 API 호출. 로그는 Time Step 1..t, Map Configuration은 전체 공개. 질문은 End-step과 동일 |
+| `--scenarios check` | Check-GoBack / Check-Stay / Check-Partial 55개 시나리오만 (irrational 경로 제외) |
+| `--scenario_ids 1,6,40` | 지정한 시나리오만 (`--scenarios`보다 우선) |
+| `--current_belief` | initial belief(t=1)와 에이전트의 현재 belief를 따로 질문. CSV에 `belief_now_*` 컬럼 추가 |
+| `--belief_order` | `initial_first`(기본) / `now_first`: 두 belief 질문의 제시 순서 (counterbalance) |
+| `--mask_hidden` | Map Configuration에서 Spot 2의 트럭 정체를 숨김 (Spot 2가 보일 때만 로그로 드러남) |
+| `--preview` | API 호출 없이 생성될 프롬프트만 출력 |
+
+체크포인트는 작업 단위(시나리오, prefixstep은 (시나리오, t))마다 저장되므로 중간에 끊겨도 같은 명령으로 이어서 실행됩니다.
+
+
 - To run the analyses, enter:
 ```bash
 # if the target model is reference data (human, btom, truebelief, nocost, motionheuristic), you don't need condition and mode

@@ -5,7 +5,8 @@ import pickle
 import numpy as np
 import pandas as pd
 import scipy.io
-from config import get_group_indices, HUMAN_MAT_PATH, HUMAN_PKL_PATH, REFERENCE_MAT_PATH, REFERENCE_PKL_DIR, BASE_RESULTS_DIR
+from config import (get_group_indices, HUMAN_MAT_PATH, HUMAN_PKL_PATH, REFERENCE_MAT_PATH, REFERENCE_PKL_DIR,
+                    BASE_RESULTS_DIR, STEPWISE_MODES, mode_folder, result_dir)
 from utils import inspect_pickle_data
 
 # =============================================================================
@@ -170,11 +171,21 @@ def convert_reference_model_to_pickle(mat_path, output_path, model_type="btom",
 # =============================================================================
 # 2. Transformer Result Processing (CSV -> PKL)
 # =============================================================================
+def _normalize_belief(bel_mean):
+    """1~7 척도 평균 (3, n_cond) -> 시나리오별 합이 1인 분포 (기존 bel_inf_mean_norm과 동일한 처리)."""
+    shifted = np.maximum(bel_mean - 1, 0)
+    total = np.nansum(shifted, axis=0)
+    total[total == 0] = 1.0
+    return shifted / total[np.newaxis, :]
+
+
 def process_model_results(target_dir, mode='normal'):
     """
     지정된 폴더(target_dir) 내의 subject_*.csv 파일들을 읽어서 model_data.pkl 파일로 자동 저장함.
-    mode='everystep'일 경우, 누적된 증거를 바탕으로 한 최종 사후 판단을 얻기 위해
+    mode='everystep' / 'prefixstep'일 경우, 누적된 증거를 바탕으로 한 최종 사후 판단을 얻기 위해
     Belief와 Desire 모두 마지막 스텝(t=End)의 데이터를 추출하여 Human Data와 구조를 맞춤.
+    (prefixstep의 마지막 스텝은 전체 로그를 본 End-step 질문과 동일한 입력임)
+    current_belief 실험의 경우 belief_now_* 컬럼도 bel_now_* 키로 함께 저장함.
     
     Args:
         target_dir (str): CSV 파일들이 있는 경로 (예: results/gpt-4o/reasoning)
@@ -202,6 +213,8 @@ def process_model_results(target_dir, mode='normal'):
     # Human data 구조인 (3, 78, 16)과 유사하게 맞춤
     des_inf = np.full((n_rating_des, n_cond, n_subj), np.nan)
     bel_inf = np.full((n_rating_bel, n_cond, n_subj), np.nan)
+    bel_now_inf = np.full((n_rating_bel, n_cond, n_subj), np.nan)  # current_belief 실험 전용
+    has_belief_now = False
 
     # 3. 데이터 로드 및 Matrix 변환
     for subj_idx, file_path in enumerate(csv_files):
@@ -216,7 +229,7 @@ def process_model_results(target_dir, mode='normal'):
                 continue # API 실패 등으로 데이터가 없으면 NaN 유지
                 
             # Mode에 따른 데이터 추출
-            if mode == 'everystep':
+            if mode in STEPWISE_MODES:
                 sc_df = sc_df.sort_values('time_step')
 
             # Desire와 Belief 모두 최종 판단(사후 추론) 결과를 가져옴
@@ -233,6 +246,13 @@ def process_model_results(target_dir, mode='normal'):
                 bel_inf[0, sc_idx, subj_idx] = row_final['belief_L']
                 bel_inf[1, sc_idx, subj_idx] = row_final['belief_M']
                 bel_inf[2, sc_idx, subj_idx] = row_final['belief_Empty']
+
+            # Current belief (current_belief 실험일 때만 존재)
+            if 'belief_now_L' in row_final:
+                has_belief_now = True
+                bel_now_inf[0, sc_idx, subj_idx] = row_final['belief_now_L']
+                bel_now_inf[1, sc_idx, subj_idx] = row_final['belief_now_M']
+                bel_now_inf[2, sc_idx, subj_idx] = row_final['belief_now_Empty']
 
     # -------------------------------------------------------------------------
     # 🌟 [추가] Raw Data의 결측치(NaN) 현황 터미널 출력
@@ -308,6 +328,10 @@ def process_model_results(target_dir, mode='normal'):
         'group_mapping': groups_raw
     }
 
+    if has_belief_now:
+        model_data['bel_now_inf'] = bel_now_inf
+        model_data['bel_now_inf_mean_norm'] = _normalize_belief(np.nanmean(bel_now_inf, axis=2))
+
     with open(output_filename, 'wb') as f:
         pickle.dump(model_data, f)
     
@@ -319,7 +343,9 @@ if __name__ == "__main__":
     # 1. 처리할 데이터의 위치를 지정하는 인자들
     parser.add_argument("--model", type=str, help="Model name (e.g., gpt-4o, btom, nocost, truebelief, motionheuristic, human)")
     parser.add_argument("--condition", type=str, help="Experiment condition (e.g., reasoning, oneshot)")
-    parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep"], help="Analysis mode")
+    parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep", "prefixstep"], help="Analysis mode")
+    parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과 폴더(*_cur)를 처리")
+    parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과 폴더(*_mask)를 처리")
     
     # 레퍼런스(논문 원본) 데이터 변환 플래그
     parser.add_argument("--ref_only", action="store_true", help="Convert reference data (MAT/R) to PKL")
@@ -364,10 +390,8 @@ if __name__ == "__main__":
                          (또는 --ref_only 플래그를 사용하세요)""")
 
         # 경로 조합 로직 (main_experiment.py와 동일)
-        if args.mode == "everystep":
-            target_dir = os.path.join(BASE_RESULTS_DIR, args.model, args.condition, "everystep")
-        else:
-            target_dir = os.path.join(BASE_RESULTS_DIR, args.model, args.condition)
+        target_dir = result_dir(args.model, args.condition,
+                                mode_folder(args.mode, args.current_belief, args.mask_hidden))
             
         print(f"💡 Task: Process Model Data (CSV -> PKL)")
         print(f"📂 Target Directory: {target_dir}")

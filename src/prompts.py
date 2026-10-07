@@ -172,15 +172,62 @@ Time Step 8: Agent at (1, 1) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is
 ]
 """
 
-def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
+def _belief_now_text(options_str, stepwise):
+    """[current_belief] 에이전트 '현재' 믿음 질문 문구. initial 질문과 구조를 맞춰 대조가 쉽게 함."""
+    if stepwise:
+        return (f"At EVERY time step, rate the student's current belief: the likelihood the student assigns, "
+                f"at that time step, to {options_str} being in Spot 2, given only what the student has seen up to that step.")
+    return (f"At the LAST time step, rate the student's current belief: the likelihood the student assigns, "
+            f"at that moment, to {options_str} being in Spot 2, given only what the student has seen so far.")
+
+
+def _build_belief_block(initial_text, now_text, json_fields, current_belief, belief_order,
+                        initial_time_step_field, json_indent):
+    """
+    belief 질문 문구(번호 2, 3)와 JSON 필드 문자열을 반환.
+    current_belief=False면 기존 문구/키('belief_scores')를 그대로 돌려줌.
+    """
+    scale = "(Scale: 1 = Definitely not there to 7 = Definitely there)"
+    init_fields = f'"time_step": 1, {json_fields}' if initial_time_step_field else json_fields
+
+    if not current_belief:
+        questions = f"""2. {initial_text}
+            {scale}"""
+        json_part = f'"belief_scores": {{ {init_fields} }}'
+        return questions, json_part
+
+    items = [("initial", initial_text, f'"belief_initial_scores": {{ {init_fields} }}'),
+             ("now", now_text, f'"belief_now_scores": {{ {json_fields} }}')]
+    if belief_order == "now_first":
+        items.reverse()
+
+    questions = "\n\n        ".join(
+        f"""{i}. {text}
+            {scale}""" for i, (_, text, _) in enumerate(items, start=2))
+    json_part = (",\n" + " " * json_indent).join(j for (_, _, j) in items)
+    return questions, json_part
+
+
+def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
+                             current_belief=False, belief_order='initial_first',
+                             mask_hidden=False):
     """
     Args:
-        df_scenario: 시나리오 데이터프레임
+        df_scenario: 시나리오 데이터프레임.
+            mode='prefixstep'이면 호출 측에서 이미 time_step <= t 로 잘라서 넘김.
         condition: 'vanilla', 'reasoning', 'oneshot'
-        mode: 'normal', 'everystep', 'reverse'
+        mode: 'normal', 'everystep', 'prefixstep', 'reverse', 'control'
+            - prefixstep: 잘린 로그에 End-step(normal)과 동일한 질문을 던짐.
+        current_belief: True면 initial belief(t=1)와 함께 에이전트의 '현재' belief를 따로 물음.
+            JSON 키가 'belief_initial_scores' / 'belief_now_scores'로 나뉨.
+        belief_order: 'initial_first' | 'now_first' (두 belief 질문의 제시 순서, counterbalance용)
+        mask_hidden: True면 Map Configuration에서 Spot 2의 트럭 정체를 숨기고,
+            로그에서 Spot 2가 보일 때만 관찰 내용을 알려줌.
     Returns:
         system_prompt, user_prompt
     """
+    if current_belief and mode not in ('normal', 'everystep', 'prefixstep'):
+        raise ValueError("current_belief는 normal / everystep / prefixstep에서만 지원됩니다.")
     # 🌟 [추가] 시나리오의 전체 타임스텝 수 계산
     max_steps = int(df_scenario['time_step'].max())
     row0 = df_scenario.iloc[0]
@@ -262,6 +309,10 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
 
     # 최종 문자열 생성 (항상 두 Spot의 상태를 명시)
     trucks_info_str = f"{spot1_truck} at Spot 1, {spot2_truck} at Spot 2"
+    if mask_hidden:
+        # 관찰자도 Spot 2의 정체를 모름 -> 로그에서 Spot 2가 보일 때만 드러남
+        trucks_info_str = (f"{spot1_truck} at Spot 1, Spot 2 is unknown "
+                           f"(its content is revealed in the log only when the student can see Spot 2)")
     
     # 1. Static Map Info (첫 번째 행 기준)
     static_info = f"""
@@ -378,6 +429,10 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
     # [1] Mode: Everystep (신규 방식 - 모든 스텝 분석)
     if mode == 'everystep':
         system_prompt = SYSTEM_PROMPT_EVERY
+        belief_questions, belief_json = _build_belief_block(
+            f"At EVERY time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1 only given the current information.",
+            _belief_now_text(options_str, stepwise=True),
+            json_fields, current_belief, belief_order, initial_time_step_field=False, json_indent=16)
 
         prefix = ""
         if condition == "oneshot":
@@ -407,15 +462,14 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
         1. At EVERY time step, rate the student's preference for Truck K, L, and M.
             (Scale: 1 = Dislike strongly to 7 = Like strongly)
 
-        2. At EVERY time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1 only given the current information.
-            (Scale: 1 = Definitely not there to 7 = Definitely there)
+        {belief_questions}
   
         Return the result in the following JSON structure:
         [
             {{
                 "time_step": 1,
                 "desire_scores": {{ "K": int, "L": int, "M": int }},
-                "belief_scores": {{ {json_fields} }}
+                {belief_json}
             }},
             {{
                 "time_step": 2,
@@ -426,8 +480,13 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
         prompt_content = f"{prefix}\n{step_instruction}"
             
     # [2] Mode: Normal (기존 방식 - 마지막 스텝만 분석)
+    #     Prefixstep도 여기로 옴: 로그가 1..t로 잘려 있을 뿐 질문은 End-step과 동일
     else:
         system_prompt = SYSTEM_PROMPT_BASE
+        belief_questions, belief_json = _build_belief_block(
+            f"At the FIRST time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.",
+            _belief_now_text(options_str, stepwise=False),
+            json_fields, current_belief, belief_order, initial_time_step_field=True, json_indent=12)
 
         prefix = ""
         if condition == "oneshot":
@@ -454,13 +513,12 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal'):
         1. At the LAST time step, rate the student's preference for Truck K, L, and M.
             (Scale: 1 = Dislike strongly to 7 = Like strongly)
         
-        2. At the FIRST time step, rate the student's likelihood for {options_str} being in the occluded spot at t=1.
-            (Scale: 1 = Definitely not there to 7 = Definitely there)
+        {belief_questions}
 
         Return the result in the following JSON structure:
         {{
             "desire_scores": {{ "K": int, "L": int, "M": int }},
-            "belief_scores": {{ "time_step": 1, {json_fields} }}
+            {belief_json}
         }}
         """
         prompt_content = f"{prefix}\n{task_instruction}"

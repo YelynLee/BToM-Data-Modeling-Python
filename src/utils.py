@@ -63,13 +63,36 @@ def get_clean_value(val):
             
     return val
 
+def _split_beliefs(obj):
+    """
+    belief 블록 추출. current_belief 모드면 initial/now 두 블록이 오고,
+    기존 모드면 'belief_scores' 하나만 옴 (-> initial로 취급, now는 빈 dict).
+    """
+    initial = obj.get('belief_initial_scores') or obj.get('belief_scores') or {}
+    now = obj.get('belief_now_scores') or {}
+    return initial, now
+
+
+def _belief_now_cols(now):
+    """belief_now_* 컬럼. 기존 모드에서는 키 자체를 만들지 않아 CSV 스키마가 바뀌지 않게 함."""
+    if not now:
+        return {}
+    return {
+        'belief_now_K': now.get('K'),
+        'belief_now_L': now.get('L'),
+        'belief_now_M': now.get('M'),
+        'belief_now_Empty': now.get('Empty'),
+    }
+
+
 def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='normal'):
     """
     JSON 응답을 파싱하여 CSV용 Flat Dictionary(또는 List of Dictionaries)로 변환
     
     Args:
         raw_response (str or dict): api_client로부터 전달받은 raw string 또는 {"thinking":..., "text":...} 딕셔너리
-        mode (str): 'normal' (Final decision) 또는 'everystep' (Step-by-step log)
+        mode (str): 'normal' / 'prefixstep' (단일 객체) 또는 'everystep' (Step-by-step log)
+            prefixstep은 normal과 같은 단일 객체로 파싱되며, time_step은 호출 측에서 채움.
     Returns:
         dict (if mode='normal') OR list (if mode='everystep')
     """
@@ -146,7 +169,7 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
                 
                 # Desire & Belief Scores 추출 (null 값이 들어와도 안전하게 빈 딕셔너리로 처리)
                 desire = item.get('desire_scores') or {}
-                belief = item.get('belief_scores') or {}
+                belief, belief_now = _split_beliefs(item)
                 
                 # 행 데이터 생성
                 row = {
@@ -177,6 +200,7 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
                     # 🌟 내부 사고 추론 기록 컬럼 추가
                     'internal_thinking': internal_thinking
                 }
+                row.update(_belief_now_cols(belief_now))
                 parsed_list.append(row)
             
             return parsed_list
@@ -189,9 +213,9 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
             d_reason = data.get('desire_reasoning', '')
             desire = data.get('desire_scores') or {}
             b_reason = data.get('belief_reasoning', '')
-            belief = data.get('belief_scores') or {}
+            belief, belief_now = _split_beliefs(data)
             
-            return {
+            row = {
                 'scenario_id': sc_id,
                 'time_step': '',
                 'group_desc': meta['group_desc'],
@@ -218,6 +242,8 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
                 # 🌟 내부 사고 추론 기록 컬럼 추가
                 'internal_thinking': internal_thinking
             }
+            row.update(_belief_now_cols(belief_now))
+            return row
         
     except Exception as e:
         return {
@@ -301,23 +327,37 @@ def inspect_pickle_data(file_path):
     except Exception as e:
         print(f"❌ Error reading pickle: {e}")
 
-def get_valid_scenarios(model_name, condition):
+def get_valid_scenarios(model_name, condition, mode_dir="everystep"):
     """
     데이터 정합성 검토 및 '유효한 시나리오' 추출:
     df_btom과 완벽하게 time_step 개수가 일치하는 (subject_id, scenario_id) 쌍만
     추출하여 set 형태로 반환합니다.
+
+    mode_dir: 'everystep', 'prefixstep', 'prefixstep_cur' 등 (config.mode_folder 참고)
+    --scenarios check 처럼 일부 시나리오만 돌린 경우, 실제로 시도된 시나리오만 기대값에 포함함.
     """
     from src.dataset import df_btom
-    from src.config import BASE_RESULTS_DIR, get_group_indices
+    from src.config import get_group_indices, result_dir
 
-    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
+    target_dir = result_dir(model_name, condition, mode_dir)
     csv_files = sorted(glob.glob(os.path.join(target_dir, "subject_*.csv")))
     
     if not csv_files:
         print(f"❌ Error: No CSV files found to validate in {target_dir}")
-        return set()
+        return set(), []
 
     expected_counts = df_btom.groupby('scenario_id')['time_step'].count().to_dict()
+
+    # 실제로 시도된 시나리오(어느 피험자 파일에든 등장한 것)만 기대값으로 사용
+    attempted = set()
+    for fp in csv_files:
+        try:
+            attempted |= set(pd.read_csv(fp, usecols=['scenario_id'])['scenario_id'].dropna().astype(int))
+        except Exception:
+            pass
+    if attempted and len(attempted) < len(expected_counts):
+        print(f"  ℹ️ Scenario subset detected: {len(attempted)}/{len(expected_counts)} scenarios attempted.")
+        expected_counts = {k: v for k, v in expected_counts.items() if k in attempted}
     
     print("\n" + "="*60)
     print("🔍 Extracting Valid Scenarios Started")
@@ -439,15 +479,16 @@ def get_valid_scenarios(model_name, condition):
     
     return final_valid_keys, selected_subjects
 
-def build_master_dataframe(model_name, condition, valid_keys):
+def build_master_dataframe(model_name, condition, valid_keys, mode_dir="everystep"):
     """
-    df_btom과 모델의 Everystep 결과를 결합하여 마스터 데이터프레임을 생성합니다.
+    df_btom과 모델의 Stepwise(everystep / prefixstep) 결과를 결합하여 마스터 데이터프레임을 생성합니다.
+    prefixstep은 time_step = 로그를 자른 길이 t 이므로 everystep과 같은 키로 병합됨.
     """
     from src.dataset import df_btom
-    from src.config import BASE_RESULTS_DIR
+    from src.config import result_dir
     from src.prepare_everystep import apply_phase_labeling
 
-    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
+    target_dir = result_dir(model_name, condition, mode_dir)
     csv_files = sorted(glob.glob(os.path.join(target_dir, "subject_*.csv")))
     
     if not valid_keys:

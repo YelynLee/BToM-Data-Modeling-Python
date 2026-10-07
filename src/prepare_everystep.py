@@ -16,7 +16,7 @@ if parent_dir not in sys.path:
 
 from src.prepare_motionheur_everystep import generate_mh_scores
 from src.dataset import df_btom
-from src.config import BASE_RESULTS_DIR, REFERENCE_PKL_DIR, HUMAN_PKL_PATH
+from src.config import BASE_RESULTS_DIR, REFERENCE_PKL_DIR, HUMAN_PKL_PATH, result_dir
 from src.utils import get_valid_scenarios, build_master_dataframe
 
 # =========================================================================
@@ -420,12 +420,13 @@ def export_btom_experiment_data(ref_model_name):
 # =========================================================================
 # 메인 실행 래퍼 함수 (run_analysis.py에서 호출)
 # =========================================================================
-def run_prepare_everystep(model_name, condition):
+def run_prepare_everystep(model_name, condition, mode_dir="everystep"):
+    """mode_dir: 'everystep', 'prefixstep', 'prefixstep_cur' 등. 출력 파일명은 호환을 위해 동일하게 유지."""
     print("\n" + "="*60)
-    print("🚀 [Everystep] Valid-only DataFrame Builder Started")
+    print(f"🚀 [{mode_dir}] Valid-only DataFrame Builder Started")
     print("="*60)
     
-    target_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition, "everystep")
+    target_dir = result_dir(model_name, condition, mode_dir)
     output_path = os.path.join(target_dir, "everystep_valid_only.csv")
     
     # 🌟 [NEW] 이미 파일이 존재하면 무거운 연산(BFS, 병합) 스킵
@@ -441,10 +442,10 @@ def run_prepare_everystep(model_name, condition):
     # ---------------------------------------------------------------------
     # 기존 데이터 구축 로직 (파일이 없을 때만 실행)
     # ---------------------------------------------------------------------
-    valid_keys, selected_subjects = get_valid_scenarios(model_name, condition)
+    valid_keys, selected_subjects = get_valid_scenarios(model_name, condition, mode_dir)
     
     if valid_keys:
-        df_master = build_master_dataframe(model_name, condition, valid_keys)
+        df_master = build_master_dataframe(model_name, condition, valid_keys, mode_dir)
 
     return selected_subjects # 이 명단을 run_analysis로 전달!
 
@@ -453,12 +454,13 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=False, default="dummy", help="Model name (e.g., gpt-4o)")
     parser.add_argument("--condition", type=str, required=False, default="dummy", help="Condition (e.g., vanilla, reasoning, oneshot)")
     # 💡 [수정] --ref 인자 추가
+    parser.add_argument("--mode_dir", type=str, default="everystep", help="everystep, prefixstep, prefixstep_cur 등 결과 하위 폴더")
     parser.add_argument("--ref", type=str, required=False, help="Reference model for generating experiment data (e.g., btom)")
     args = parser.parse_args()
 
     # 일반적인 valid_only 구축
     if args.model != "dummy" and args.condition != "dummy":
-        run_prepare_everystep(args.model, args.condition)
+        run_prepare_everystep(args.model, args.condition, args.mode_dir)
 
     # 💡 --ref 인자가 들어왔을 때만 역방향 추론용 CSV 파일 추출 실행
     if args.ref:
