@@ -21,6 +21,7 @@ from src.utils import process_result_json, inspect_pickle_data
 from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES,
                         mode_folder, get_scenario_subset)
 from src.data_processor import process_model_results
+from src.control_items import sample_probes
 
 # 응답 JSON을 그대로 저장하는 mode (desire/belief 평정이 아닌 응답)
 RAW_JSON_MODES = ("reverse", "control")
@@ -58,6 +59,23 @@ def make_meta(group_df):
         'group_desc': group_df.get('group_desc', pd.Series(["Unknown"])).iloc[0],
         'truck_presence': " and ".join(present_trucks) + " present" if present_trucks else "No trucks present"
     }
+
+
+def variant_folder(effort=None, thinking="default", temperature=None):
+    """
+    추론/샘플링 설정에 따른 하위 폴더 이름. 기본 설정이면 '' (기존 경로 그대로).
+      effort=low                      -> 'effort_low'   (기존과 동일)
+      thinking=off                    -> 'thinking_off'
+      thinking=off, temperature=1.0   -> 'thinking_off_temp1.0'
+    """
+    parts = []
+    if effort:
+        parts.append(f"effort_{effort}")
+    if thinking and thinking != "default":
+        parts.append(f"thinking_{thinking}")
+    if temperature is not None:
+        parts.append(f"temp{temperature:g}" if float(temperature) != int(temperature) else f"temp{float(temperature):.1f}")
+    return "_".join(parts)
 
 
 def resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, seed=0):
@@ -161,7 +179,7 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
 def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, version="",
                    scenarios="all", scenario_ids=None, current_belief=False,
                    belief_order="random", mask_hidden=False, preview=False,
-                   legacy_wording=False, order_seed=0):
+                   legacy_wording=False, order_seed=0, thinking="default", temperature=None):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
@@ -183,7 +201,10 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording)
     base_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition_folder, sub) if sub \
         else os.path.join(BASE_RESULTS_DIR, model_name, condition_folder)
-    save_dir = os.path.join(base_dir, f"effort_{effort}") if effort else base_dir
+    variant = variant_folder(effort, thinking, temperature)
+    save_dir = os.path.join(base_dir, variant) if variant else base_dir
+    if thinking != "default" or temperature is not None:
+        print(f"   -> thinking={thinking}, temperature={temperature if temperature is not None else 'default'}")
 
     # =========================================================================
     # Mode에 따른 데이터소스 분기 (Reverse 모드 지원)
@@ -220,8 +241,9 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
             show = units[:1]
         for key, sc_id, t_cut, df_input in show:
             order = resolve_belief_order(belief_order, 1, sc_id, t_cut, order_seed)
-            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode,
-                                                               belief_order=order, **prompt_kwargs)
+            probes = sample_probes(df_input, 1, order_seed) if mode == "control" else None
+            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
+                                                               control_probes=probes, **prompt_kwargs)
             print("=" * 70)
             print(f"[Preview] scenario {sc_id}" + (f", t = {t_cut}" if t_cut else "")
                   + (f", belief order = {order}" if current_belief else "")
@@ -259,11 +281,14 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
 
             # 프롬프트 생성 (prefixstep이면 df_input이 1..t로 잘려 있음)
             order = resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, order_seed)
-            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode,
-                                                               belief_order=order, **prompt_kwargs)
+            # control: 피험자마다 다른 시점을 묻도록 probe를 (seed, subject, scenario)로 추출
+            probes = sample_probes(df_input, subject_idx, order_seed) if mode == "control" else None
+            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
+                                                               control_probes=probes, **prompt_kwargs)
 
             # 모델 호출
-            response_str = call_model_api(model_name, sys_prompt, user_prompt, effort=effort)
+            response_str = call_model_api(model_name, sys_prompt, user_prompt, effort=effort,
+                                          thinking=thinking, temperature=temperature)
 
             if response_str:
                 rows = parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode)
@@ -276,6 +301,13 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
             if current_belief:
                 for r in rows:
                     r['belief_order'] = order  # 분석에서 순서 효과를 확인할 수 있도록 기록
+            if probes:
+                for r in rows:
+                    r.update(probes)  # 채점 시 같은 시점으로 정답을 계산하기 위해 저장
+            meta_info = response_str.get("meta") if isinstance(response_str, dict) else None
+            if meta_info:
+                for r in rows:
+                    r.update(meta_info)  # thinking 설정, temperature, 출력 토큰 수 등
 
             results[key] = rows
             save_rows(results, filename)  # 작업 단위마다 저장 -> 중간에 끊겨도 이어서 진행 가능
@@ -306,7 +338,12 @@ if __name__ == "__main__":
                         choices=["normal", "everystep", "prefixstep", "reverse", "control"],
                         help="normal(End-step) / everystep / prefixstep(t마다 로그를 잘라 End-step 질문) / reverse / control")
     parser.add_argument("--subjects", type=int, default=16, help="Number of virtual subjects")
-    parser.add_argument("--effort", type=str, default=None, choices=["none", "low", "medium", "high"], help="Reasoning effort level (only for supported models)")
+    parser.add_argument("--effort", type=str, default=None, choices=["none", "low", "medium", "high", "max"],
+                        help="Reasoning effort level. Claude는 output_config.effort로 전달 ('none'은 thinking off로 처리)")
+    parser.add_argument("--thinking", type=str, default="default", choices=["default", "on", "off"],
+                        help="Claude thinking. default: 기존 실험과 동일(Opus adaptive / Sonnet 없음), on: adaptive, off: disabled")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="sampling temperature (기본: 기존 값 0.7, thinking 사용 시 1.0 고정). 예: thinking off에서 1.0으로 맞출 때 --temperature 1.0")
     parser.add_argument("--version", type=str, default="", help="Condition 폴더명 뒤에 붙일 버전 (예: 2 -> vanilla2)")
 
     # 비용 제어
@@ -338,9 +375,23 @@ if __name__ == "__main__":
         # normal은 하위 폴더가 없어 End-step 결과를 덮어쓸 수 있으므로 막아둠
         parser.error("--mask_hidden + normal은 결과 폴더가 End-step과 겹칩니다. prefixstep의 마지막 스텝을 사용하세요.")
 
+    # thinking / effort / temperature 조합 정리
+    is_claude = "claude" in args.model
+    if is_claude and args.effort == "none":
+        if args.thinking == "on":
+            parser.error("--effort none과 --thinking on은 함께 쓸 수 없습니다.")
+        print("💡 Claude에는 'none' effort가 없어 --thinking off로 처리합니다.")
+        args.thinking, args.effort = "off", None
+    if args.thinking != "default" and not is_claude:
+        parser.error("--thinking은 현재 Claude 모델에만 적용됩니다. 다른 모델은 --effort로 추론량을 조절하세요.")
+    thinking_used = args.thinking == "on" or (args.thinking == "default" and "claude-opus" in args.model)
+    if thinking_used and args.temperature is not None and args.temperature != 1.0:
+        parser.error("thinking을 사용할 때 temperature는 1.0만 가능합니다. (--thinking off와 함께 지정하세요)")
+
     ids = [int(x) for x in args.scenario_ids.split(",")] if args.scenario_ids else None
 
     run_experiment(args.model, args.condition, args.mode, args.subjects, args.effort, args.version,
                    scenarios=args.scenarios, scenario_ids=ids, current_belief=args.current_belief,
                    belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
-                   legacy_wording=args.legacy_wording, order_seed=args.order_seed)
+                   legacy_wording=args.legacy_wording, order_seed=args.order_seed,
+                   thinking=args.thinking, temperature=args.temperature)
