@@ -39,10 +39,88 @@ client_claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # ==============================================================================
 # 2. 실험 진행
 # ==============================================================================
-def call_model_api(model_name, system_prompt, user_prompt, effort=None):
+THINKING_SETTINGS = ("default", "on", "off")
+
+
+def _call_claude(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
+    """
+    Claude 호출 (Opus / Sonnet 공통).
+
+    thinking:
+      - "default": 기존 실험과 동일한 요청 (논문 결과 재현용)
+                   Opus   -> adaptive thinking, temperature 1.0, max_tokens 16000
+                   Sonnet -> thinking 없음, temperature TEMPERATURE(0.7), max_tokens 4000
+      - "on"     : adaptive thinking. thinking을 켜면 temperature는 1.0이어야 함.
+      - "off"    : thinking={"type": "disabled"} 로 명시적으로 끔.
+    effort: output_config.effort 로 전달 ("low" / "medium" / "high" / "max").
+            Claude에는 "none" effort가 없으므로 호출 측(main_experiment)에서 thinking="off"로 바꿔서 넘김.
+    temperature: None이면 위 기본값. thinking off에서 1.0으로 맞추고 싶을 때 지정.
+
+    Returns: {"thinking": str, "text": str, "meta": dict}
+    """
+    is_opus = "claude-opus" in model_name
+
+    if thinking == "default":
+        use_thinking = is_opus
+    else:
+        use_thinking = (thinking == "on")
+
+    if use_thinking:
+        thinking_cfg = {"type": "adaptive"}
+        temp = 1.0  # thinking 사용 시 temperature는 1.0만 허용
+        max_tokens = 16000
+    else:
+        thinking_cfg = {"type": "disabled"} if thinking == "off" else None
+        temp = temperature if temperature is not None else TEMPERATURE
+        max_tokens = 8000 if thinking == "off" else 4000
+
+    kwargs = {
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+        "temperature": temp,
+    }
+    if thinking_cfg is not None:
+        kwargs["thinking"] = thinking_cfg
+    if effort and effort != "none":
+        # SDK 버전과 무관하게 동작하도록 extra_body로 전달
+        kwargs["extra_body"] = {"output_config": {"effort": effort}}
+
+    response = client_claude.messages.create(**kwargs)
+
+    thinking_content, text_content = "", ""
+    for block in response.content:
+        if block.type == "thinking":
+            thinking_content += block.thinking
+        elif block.type == "text":
+            text_content += block.text
+
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        print(f"\n⚠️ [Warning] {model_name}: max_tokens({max_tokens})에 도달해 응답이 잘렸을 수 있습니다.")
+
+    usage = getattr(response, "usage", None)
+    meta = {
+        "thinking_setting": thinking if thinking != "default" else ("default(adaptive)" if is_opus else "default(none)"),
+        "temperature": temp,
+        "effort": effort or "",
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "thinking_chars": len(thinking_content),
+        "stop_reason": getattr(response, "stop_reason", None),
+    }
+    # utils.process_result_json이 thinking / text를 바로 매핑할 수 있도록 딕셔너리로 반환
+    return {"thinking": thinking_content, "text": text_content, "meta": meta}
+
+
+def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
     """
     재시도 로직이 포함된 API 호출 함수
+
+    thinking: "default" | "on" | "off"  (현재 Claude에만 적용. 다른 모델은 effort로 추론량을 조절)
+    temperature: None이면 기존 기본값(TEMPERATURE). temperature를 받는 모델(gpt-4o, gemini-2.5,
+                 deepseek, thinking을 끈 Claude)에만 적용됨.
     """
+    temp = temperature if temperature is not None else TEMPERATURE
     retry_count = 0
     while retry_count < MAX_RETRIES:
         try:
@@ -84,7 +162,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=TEMPERATURE,
+                    temperature=temp,
                     response_format={"type": "json_object"}
                 )
                 return response.choices[0].message.content
@@ -125,7 +203,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=TEMPERATURE,
+                    temperature=temp,
                     response_format={"type": "json_object"}
                 )
                 return response.choices[0].message.content
@@ -141,7 +219,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": TEMPERATURE
+                    "temperature": temp
                 }
                 
                 # 2. deepseek-chat(V3)일 때만 JSON 모드 활성화 
@@ -155,54 +233,11 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None):
                 return response.choices[0].message.content
             
             # ----------------------------------------
-            # CASE 4-1: Claude Reasoning Series
+            # CASE 4: Claude Series (Opus / Sonnet) - thinking / effort / temperature 제어
             # ----------------------------------------
-            elif "claude-opus" in model_name:
-                # 1. thinking 토큰 용량을 고려하여 max_tokens를 16000 이상으로 넉넉하게 설정합니다.
-                # 2. adaptive thinking 모드 활성화 시 temperature는 반드시 1.0 이어야 합니다.
-                thinking_config = {"type": "adaptive"}
-                
-                response = client_claude.messages.create(
-                    model=model_name,
-                    max_tokens=16000,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=1.0,
-                    thinking=thinking_config
-                )
-                
-                # response.content 배열을 돌면서 각각의 블록을 추출합니다.
-                thinking_content = ""
-                text_content = ""
-                
-                for block in response.content:
-                    if block.type == "thinking":
-                        thinking_content += block.thinking
-                    elif block.type == "text":
-                        text_content += block.text
-
-                # utils.py에서 두 정보를 한 번에 매핑할 수 있도록 딕셔너리로 반환합니다.
-                return {
-                    "thinking": thinking_content,
-                    "text": text_content
-                }
-            
-            # ----------------------------------------
-            # CASE 4-2: Claude Series
-            # ----------------------------------------
-            elif "claude-sonnet" in model_name:                
-                response = client_claude.messages.create(
-                    model=model_name,
-                    max_tokens=4000,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=TEMPERATURE
-                )
-                return response.content[0].text
+            elif "claude" in model_name:
+                return _call_claude(model_name, system_prompt, user_prompt,
+                                    effort=effort, thinking=thinking, temperature=temperature)
 
             # ----------------------------------------
             # CASE 5: 지원하지 않는 모델 방어 로직

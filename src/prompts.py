@@ -1,4 +1,5 @@
 from dataset import df_btom
+from control_items import sample_probes, control_task_text
 import pandas as pd
 
 SYSTEM_PROMPT_BASE = """
@@ -249,7 +250,7 @@ def _build_belief_block(initial_text, now_text, json_fields, current_belief, bel
 
 def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
                              current_belief=False, belief_order='initial_first',
-                             mask_hidden=False, legacy_wording=False):
+                             mask_hidden=False, legacy_wording=False, control_probes=None):
     """
     Args:
         df_scenario: 시나리오 데이터프레임.
@@ -265,6 +266,7 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
             로그에서 Spot 2가 보일 때만 관찰 내용을 알려줌.
         legacy_wording: True면 everystep / prefixstep의 belief 문구를 이번 수정 이전 것으로 사용
             (기존 Every-step 결과와 동일한 프롬프트 재현용). normal(End-step)은 항상 원래 문구.
+        control_probes: mode='control'에서 문항 시점 dict (control_items.sample_probes 결과).
     Returns:
         system_prompt, user_prompt
     """
@@ -431,12 +433,9 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
     if mode == 'control':
         system_prompt = SYSTEM_PROMPT_CONTROL
 
-        # probe time steps
-        t_pos = int(df_scenario['time_step'].iloc[len(df_scenario) // 2])   # Q1
-        vis2 = df_scenario[df_scenario['visible_goal2'] == 1]
-        t_vis = int(vis2['time_step'].min()) if not vis2.empty else None
-        # Q2: a step strictly before first visibility (else the first step)
-        t_occ = max(1, (t_vis - 1)) if t_vis else int(df_scenario['time_step'].max())
+        # 문항 시점(probe)은 main_experiment에서 피험자별로 뽑아 넘김.
+        # 넘겨받지 못한 경우(단독 호출, preview 등)는 subject 1의 probe를 사용.
+        probes = control_probes or sample_probes(df_scenario, subject_idx=1, seed=0)
 
         task_instruction = f"""
         # [TARGET SCENARIO START]
@@ -447,25 +446,7 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
         [Chronological Log]
         {dynamic_logs}
 
-        This log has {max_steps} time steps. Answer the following questions about what the log
-        states. These are questions about the log itself, not about the student's preferences or
-        thoughts.
-
-        1. What were the student's coordinates at Time Step {t_pos}?
-        2. At Time Step {t_occ}, was Spot 2 visible to the student? Answer "yes" or "no".
-        3. At which time step did the student FIRST observe the contents of Spot 2?
-        If Spot 2 was never visible, answer 0.
-        4. At the LAST time step, where was the student?
-        Answer exactly one of: "Spot 1", "Spot 2", or "Neither".
-
-        Return the result in the following JSON structure:
-        {{
-            "q1_position": {{ "x": int, "y": int }},
-            "q2_spot2_visible": "yes",
-            "q3_first_observed_step": int,
-            "q4_final_location": "Spot 1"
-        }}
-        """
+        {control_task_text(probes, max_steps)}"""
         return system_prompt, task_instruction
     
     # [1] Mode: Everystep (신규 방식 - 모든 스텝 분석)
