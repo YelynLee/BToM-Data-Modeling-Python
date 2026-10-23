@@ -142,7 +142,8 @@ python analysis/compare_stepwise_bootstrap.py --input <everystep_valid_only.csv>
 | `--mode prefixstep` | (scenario, t)마다 독립 API 호출. 로그는 Time Step 1..t, Map Configuration은 전체 공개. 질문은 End-step과 동일 |
 | `--scenarios` | `all`(78) / `rational`(irrational 제외 73, 논문 분석 범위) / `check`(55) / `goback`(Check-GoBack 22) |
 | `--scenario_ids 1,6,40` | 지정한 시나리오만 (`--scenarios`보다 우선) |
-| `--batch` | Claude Message Batches API로 실행. `batch_state.json`에 batch id를 저장해 재실행 시 재제출 없이 결과를 가져오고, 실패한 요청만 다시 제출 |
+| `--batch` | Batch API로 실행 (Claude / OpenAI / Gemini, 50% 할인). `batch_state.json`에 batch 정보를 저장해 재실행 시 재제출 없이 결과를 가져오고, 실패한 요청만 다시 제출 |
+| `--workers N` | Batch가 없는 모델(DeepSeek 등)용: 단건 호출을 N개씩 동시에 보냄. 응답마다 저장되므로 중단 후 이어서 실행 가능 |
 | `--new_wording` | (실험용) everystep / prefixstep에 `only given the information up to step t` 문구 사용 → `*_upto` 폴더. 기본은 논문과 같은 문구 |
 | `--current_belief` | (부차적) initial belief와 함께 "At the LAST time step, ... being in Spot 2" 질문 추가. CSV에 `belief_now_*` |
 | `--belief_order` | `--current_belief`일 때 두 질문의 순서. `random`(기본, 시드 고정) / `initial_first` / `now_first` |
@@ -151,6 +152,26 @@ python analysis/compare_stepwise_bootstrap.py --input <everystep_valid_only.csv>
 
 결과 폴더: 논문과 같은 문구가 기본이며 `everystep/`, `prefixstep/`에 저장됩니다. `--new_wording` 결과는 `*_upto/`로 분리됩니다.
 체크포인트는 작업 단위(시나리오, prefixstep은 (시나리오, t))마다 저장되므로 중간에 끊겨도 같은 명령으로 이어서 실행됩니다.
+
+- 다른 모델 / 응답 원문·토큰, enter:
+```bash
+# 같은 요청 내용(src/llm_requests.py)을 단건 호출과 Batch가 함께 사용
+python main_experiment.py --model gpt-5.4 --mode prefixstep --scenarios all --subjects 5 --effort low --batch
+python main_experiment.py --model gemini-2.5-pro --mode prefixstep --scenarios all --subjects 5 --batch
+python main_experiment.py --model deepseek-reasoner --mode prefixstep --scenarios all --subjects 5 --workers 8
+
+# 이미 끝난 Batch의 응답 원문·토큰을 다시 받아 CSV에 채움 (재호출 없음, 점수는 그대로)
+#   보관 기간: Claude 29일, OpenAI 30일, Gemini 6주
+python -m src.fetch_batch_responses --dir results/claude-opus-4-6/vanilla/prefixstep/thinking_off
+
+# 응답 원문을 그룹 × phase로 층화 추출해 읽기 (+ Spot 2를 보기 전에 실제 내용을 언급하는지 휴리스틱 표시)
+python analysis/sample_responses.py --dir results/claude-opus-4-6/vanilla/prefixstep/thinking_off --n 2
+```
+새로 저장되는 열: `response_text`(응답 원문, Every-step은 시나리오의 첫 행에만), `n_judgements`(한 응답이 답한 스텝 수),
+`input_tokens`, `output_tokens`, `reasoning_tokens`, `thinking_chars`.
+판단 하나당 출력량은 `output_tokens / n_judgements`로 비교합니다.
+토큰 정의는 제공사마다 다릅니다: OpenAI·DeepSeek·Claude의 `output_tokens`는 추론 토큰을 포함하고, Gemini의 `output_tokens`(candidates)는 포함하지 않으므로 Gemini는 `output_tokens + reasoning_tokens`가 전체 출력입니다.
+Gemini 2.5의 단건 호출은 논문과 같이 OpenAI 호환 엔드포인트를, Batch는 네이티브 엔드포인트를 사용합니다(같은 system instruction·temperature·JSON 출력).
 
 
 - Control experiment (공간/궤적·질문 이해 점검) & reasoning 설정, enter:
