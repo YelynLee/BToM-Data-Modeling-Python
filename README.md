@@ -167,8 +167,29 @@ python analysis/control_eval.py --model claude-opus-4-6 --condition vanilla --va
 | `--temperature` | 기본은 기존 값(0.7, thinking 사용 시 1.0 고정). thinking off에서 1.0으로 맞출 때 `--temperature 1.0` |
 | `--effort` | Claude에도 `output_config.effort`로 전달 (`low`/`medium`/`high`/`max`; `none`은 thinking off로 처리) |
 
-control 문항: q1–q9 좌표·가시성·이동·거리, q10 t=1에 가려진 spot, q11/q12 FIRST/LAST 시점 좌표,
-q13 질문 해석 객관식 (a: End-step·Prefix 문구, b: Every-step 문구; 선택지 b = current 해석, c = hindsight 해석).
+control 문항 (v3): q1/q2 FIRST/LAST 좌표, q3 t=1에 가려진 spot, q4 LAST 위치(범주), q5 두 시점의 Spot 2 가시 여부,
+q6 Spot 2를 처음 본 스텝, q7/q8 시작점에서 Spot 1/2까지 최단 이동, q9 전체 이동, q10 제자리 스텝, q11 특정 시점 거리 변화,
+q12 질문 해석 객관식 (a: End-step·Prefix 문구, b: Every-step 문구; 선택지 b = current 해석, c = hindsight 해석).
+이전 9문항·13문항 결과도 `control_eval.py`가 현재 번호로 변환해 채점합니다.
+
+
+- Statistics (리뷰어 대응), enter:
+```bash
+# End-step: 사람 신뢰도(split-half, 상한선), 레퍼런스·LLM별 r(사람) + CI, LLM - BToM 차이(paired bootstrap, Williams, Holm),
+#           Better - Worse, End vs Every 최종 스텝 (pooled / 모델 평균 두 방식). 기본 73개 시나리오
+python analysis/endstep_stats.py --condition vanilla --out_dir results/stats
+
+# Stepwise 조건 비교: rm_corr, VPA(고유 R² + β), hindsight 지수(전체/구간별), |LLM - BToM|
+#   2단계 bootstrap(시나리오 -> 피험자) CI, 첫 조건 대비 paired 차이 CI / p, 시나리오 단위 sign-flip 순열 검정,
+#   --match_subjects k: 첫 조건에서 k명씩 뽑아 피험자 수 차이의 영향 확인
+python analysis/compare_stepwise_bootstrap.py \
+  --input results/claude-opus-4-6/vanilla/everystep/everystep_valid_only.csv results/claude-opus-4-6/vanilla/prefixstep/thinking_off \
+  --labels "Every-step" "Prefix-step" --groups 1,4 --match_subjects 5 --out_dir results/claude-opus-4-6/vanilla/compare
+
+# Control: 문항별 정확도·q12 해석 선택 비율의 CI, 시나리오별 사실 정확도 vs End-step ToM 오차 상관
+python analysis/control_eval.py --model claude-opus-4-6 --variant thinking_off --tom_link
+```
+공통 함수(층화 시나리오 bootstrap, Williams/Steiger, sign-flip, Holm, split-half)는 `analysis/stats_utils.py`.
 
 참고: 원래 Map Configuration에는 격자 크기(15×5)가 없어서, 건물이 가장자리에 닿는 배치에서는 프롬프트만으로 격자 밖 우회 경로가 가능해 보입니다. control 채점은 최단거리 문항(q5, q6)을 실제 격자 기준과 경계 없는 기준 두 가지로 모두 기록합니다.
 

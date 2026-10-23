@@ -1,25 +1,36 @@
 """
-Stepwise 조건(everystep / prefixstep 등) 간 비교 + 시나리오 단위 paired bootstrap 신뢰구간.
+Stepwise 조건(everystep / prefixstep 등) 비교 + 신뢰구간 / 검정.
 
-논문 everystep 분석과 같은 지표를 같은 시나리오 집합에서 계산하고,
-모든 조건에 '같은 리샘플 인덱스'를 써서 조건 간 차이의 CI까지 구함.
+같은 시나리오 집합에서 논문 everystep 지표를 조건별로 계산하고, 첫 번째 조건 대비 차이를 검정함.
 
 지표
   1) rm_corr (calc_everystep_correlation.py와 같은 정의): 옵션별, 시나리오 내 평균을 뺀 뒤의 상관
-       belief: L / M / Empty,  desire: K / L / M  ×  ref: BToM / Hindsight
-  2) BToM 우위 = mean_option(r_BToM) - mean_option(r_Hindsight)   (belief)
-  3) VPA 고유 설명력 (everystep_vpa_analysis.py와 같은 정의: 옵션을 melt, z-score, OLS adjusted R^2)
-       belief 예측변수: btom, truebelief, nocost, motionheuristic, hindsight
-       ※ CI를 위해 0으로 자르지(clip) 않은 값을 보고함
-       ※ 고유 설명력은 부호가 없으므로 표준화 회귀계수(vpa_*_beta_*)도 함께 보고함
+       belief: L / M / Empty,  desire: K / L / M  ×  ref: BToM / Hindsight  (+ 옵션 평균, BToM - Hindsight)
+  2) VPA (everystep_vpa_analysis.py와 같은 정의, belief): 고유 adjusted R^2 + 표준화 β(부호)
+       예측변수: btom, truebelief, nocost, motionheuristic, hindsight  (CI를 위해 0으로 자르지 않음)
+  3) hindsight 지수 (belief): 시나리오마다 h_s = Σ_t (LLM - BToM)·(Hind - BToM) / Σ_t ||Hind - BToM||^2
+       = LLM이 BToM에서 벗어난 정도를 Hindsight가 BToM에서 벗어난 방향에 투영한 기울기 (원점 통과 회귀).
+       0 = BToM과 같음, 1 = Hindsight만큼 벗어남, 1 초과 = Hindsight보다 더 크게 같은 방향으로 벗어남.
+       ||Hind - BToM|| < 0.05인 스텝은 제외 (두 모델이 사실상 같은 예측). 두 모델 차이가 큰 스텝에 가중치가 실려
+       스텝별 비율 평균보다 안정적. 시나리오 간 평균으로 집계하며 구간(phase)별로도 계산.
+  4) |LLM - BToM| 평균 절대오차 (belief, 시나리오 평균 후 평균)
 
-Bootstrap: 그룹(행동 조건)별로 층화하여 시나리오를 복원추출 (n_boot회). 각 시나리오의 모든 스텝은 함께 뽑힘.
-Every-step 1명 기준 분포: 피험자 1명씩만 썼을 때의 지표 (피험자 수 차이의 영향 확인용)
+신뢰구간
+  - 2단계 bootstrap: 시나리오를 행동 그룹별 층화 복원추출(모든 조건에 같은 리샘플) ->
+    각 조건 안에서 피험자를 복원추출 (피험자가 1명이면 시나리오만)
+  - 첫 조건 대비 차이: 같은 시나리오 리샘플에서의 차이 분포 -> CI, bootstrap p
+검정 (첫 조건 대비)
+  - 시나리오 단위 paired sign-flip 순열 검정: hindsight 지수, |LLM - BToM| (시나리오 평균 차이)
+피험자 수 맞추기
+  - --match_subjects k: 첫 조건(보통 Every-step 16명)에서 k명을 무작위로 여러 번 뽑아 지표 분포를 보고
+    (피험자 수 차이가 결론을 바꾸지 않는지 확인)
 
 사용 예)
   python analysis/compare_stepwise_bootstrap.py \\
-     --input results/claude-opus-4-6/vanilla/everystep/everystep_valid_only.csv results/claude-opus-4-6/vanilla/prefixstep \\
-     --labels "Every-step" "Prefix-step" --groups 1,4 --per_subject 0 --out_dir results/claude-opus-4-6/vanilla/compare
+     --input results/claude-opus-4-6/vanilla/everystep/everystep_valid_only.csv \\
+             results/claude-opus-4-6/vanilla/prefixstep/thinking_off \\
+     --labels "Every-step" "Prefix-step" --groups 1,4 --match_subjects 5 \\
+     --out_dir results/claude-opus-4-6/vanilla/compare
 """
 import os
 import sys
@@ -29,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (ROOT, os.path.join(ROOT, "src")):
+for p in (ROOT, os.path.join(ROOT, "src"), os.path.join(ROOT, "analysis")):
     if p not in sys.path:
         sys.path.append(p)
 
@@ -37,24 +48,33 @@ from src.dataset import df_btom
 from src.config import get_group_indices
 from src.prepare_everystep import apply_phase_labeling, load_reference_everystep
 from analysis.plot_everystep import get_phase_index
+from stats_utils import (stratified_boot_indices, percentile_ci, boot_p_two_sided, paired_signflip_test)
 
 OPTS = {"belief": ["L", "M", "Empty"], "desire": ["K", "L", "M"]}
+# 열 순서를 명시적으로 고정: desire 3개 다음 belief 3개 (BEL 슬라이스가 이 순서에 의존)
+COLS = [f"desire_{o}" for o in OPTS["desire"]] + [f"belief_{o}" for o in OPTS["belief"]]
+BEL = slice(3, 6)
+assert all(c.startswith("belief_") for c in COLS[BEL])
 CORR_REFS = ["btom", "hindsight"]
-VPA_REFS = {"belief": ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]}
+VPA_REFS = ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]
+ALL_REFS = sorted(set(CORR_REFS) | set(VPA_REFS))
+H_EPS = 0.05
+PHASE_NAMES = {0: "Start", 1: "Appr G1", 2: "Pass G1", 3: "See G2", 4: "Stop", 5: "Return/Appr G2", 6: "Selected"}
 
 
-# -------------------------------------------------------------------------
-# 데이터
-# -------------------------------------------------------------------------
+# =========================================================================
+# 데이터 준비
+# =========================================================================
 def load_rows(path):
     """subject_*.csv 폴더, csv 하나, 또는 everystep_valid_only.csv(subject_id 포함) 모두 지원."""
     if os.path.isdir(path):
-        files = sorted(glob.glob(os.path.join(path, "subject_*.csv")))
         frames = []
-        for f in files:
+        for f in sorted(glob.glob(os.path.join(path, "subject_*.csv"))):
             d = pd.read_csv(f)
             d["subject_id"] = int(os.path.basename(f).split("_")[1].split(".")[0])
             frames.append(d)
+        if not frames:
+            raise FileNotFoundError(f"No subject_*.csv in {path}")
         df = pd.concat(frames, ignore_index=True)
     else:
         df = pd.read_csv(path)
@@ -62,112 +82,151 @@ def load_rows(path):
             df["subject_id"] = 1
     if "error" in df.columns:
         df = df[df["error"].isna()]
-    cols = ["subject_id", "scenario_id", "time_step"] + [f"{s}_{o}" for s in OPTS for o in OPTS[s]]
-    df = df[cols].dropna()
-    # 모든 스텝이 있는 (subject, scenario)만
+    df = df[["subject_id", "scenario_id", "time_step"] + COLS].dropna()
     exp = df_btom.groupby("scenario_id").size()
     n = df.groupby(["subject_id", "scenario_id"]).size().reset_index(name="n")
     ok = n[n["n"] == n["scenario_id"].map(exp)][["subject_id", "scenario_id"]]
     return df.merge(ok, on=["subject_id", "scenario_id"])
 
 
-def to_prob(block):
-    shifted = np.maximum(block - 1, 0)
-    return shifted.div(shifted.sum(axis=1).replace(0, 1.0), axis=0)
+def row_table(scen_ids):
+    """(scenario, time_step) 행 목록 + phase_idx. 궤적만으로 정해짐."""
+    d = df_btom[df_btom["scenario_id"].isin(scen_ids)].copy()
+    d["subject_id"] = 0
+    d = apply_phase_labeling(d)
+    d["phase_idx"] = [get_phase_index(g, p) for g, p in zip(d["group_id"], d["phase"])]
+    d = d[d["phase_idx"] != 9].sort_values(["scenario_id", "time_step"]).reset_index(drop=True)
+    return d[["scenario_id", "time_step", "group_id", "phase_idx"]]
 
 
-_PHASE_CACHE = {}
-
-
-def phases():
-    """(scenario_id, time_step) -> group_id, phase_idx  (궤적만으로 정해지므로 한 번만 계산)"""
-    if "p" not in _PHASE_CACHE:
-        d = df_btom.copy()
-        d["subject_id"] = 0
-        d = apply_phase_labeling(d)
-        d["phase_idx"] = [get_phase_index(g, p) for g, p in zip(d["group_id"], d["phase"])]
-        _PHASE_CACHE["p"] = d[["scenario_id", "time_step", "group_id", "phase_idx"]]
-    return _PHASE_CACHE["p"]
-
-
-def aggregate(df, subjects=None):
-    """피험자 평균 -> belief 확률 정규화 (논문 파이프라인과 동일 순서)."""
-    if subjects is not None:
-        df = df[df["subject_id"].isin(subjects)]
-    m = df.groupby(["scenario_id", "time_step"], as_index=False).mean(numeric_only=True)
-    bcols = [f"belief_{o}" for o in OPTS["belief"]]
-    m[bcols] = to_prob(m[bcols]).values
-    return m.drop(columns=["subject_id"])
-
-
-def attach_refs(m, refs):
+def ref_arrays(rows, refs):
+    out = {}
     for name, r in refs.items():
-        cols = [f"{s}_{o}" for s in OPTS for o in OPTS[s]]
-        m = m.merge(r[["scenario_id", "time_step"] + cols].rename(columns={c: f"{name}__{c}" for c in cols}),
-                    on=["scenario_id", "time_step"], how="left")
-    m = m.merge(phases(), on=["scenario_id", "time_step"], how="left")
-    return m[m["phase_idx"] != 9].sort_values(["scenario_id", "time_step"]).reset_index(drop=True)
+        m = rows[["scenario_id", "time_step"]].merge(r[["scenario_id", "time_step"] + COLS],
+                                                   on=["scenario_id", "time_step"], how="left")
+        out[name] = m[COLS].to_numpy(float)
+    return out
 
 
-# -------------------------------------------------------------------------
-# 지표 (시나리오 가중치 w 를 받아 bootstrap에 재사용)
-# -------------------------------------------------------------------------
-class Metrics:
-    def __init__(self, m, scenario_order):
-        self.m = m
-        self.sc = scenario_order
-        self.idx = {s: np.where(m["scenario_id"].values == s)[0] for s in scenario_order}
-        # rm_corr 충분통계량: 시나리오별 within-centered Sxy, Sxx, Syy
-        self.suff = {}
-        for score, opts in OPTS.items():
-            for o in opts:
-                col = f"{score}_{o}"
-                for ref in CORR_REFS:
-                    rc = f"{ref}__{col}"
-                    xs, ys, xy = [], [], []
-                    for s in scenario_order:
-                        x = m[col].values[self.idx[s]]; y = m[rc].values[self.idx[s]]
-                        x = x - x.mean(); y = y - y.mean()
-                        xy.append((x * y).sum()); xs.append((x * x).sum()); ys.append((y * y).sum())
-                    self.suff[(score, o, ref)] = tuple(map(np.array, (xy, xs, ys)))
+def subject_array(df, rows):
+    """피험자 x 행 x 6 (원점수). 해당 피험자에게 없는 시나리오는 NaN."""
+    subs = sorted(df["subject_id"].unique())
+    arr = np.full((len(subs), len(rows), len(COLS)), np.nan)
+    key = rows[["scenario_id", "time_step"]]
+    for i, s in enumerate(subs):
+        m = key.merge(df[df["subject_id"] == s], on=["scenario_id", "time_step"], how="left")
+        arr[i] = m[COLS].to_numpy(float)
+    return arr, subs
 
-    def rm_corr(self, w):
+
+def aggregate(arr, subj_w=None):
+    """피험자 (가중)평균 -> belief 확률 정규화 (논문 파이프라인과 같은 순서). Returns: (n_rows, 6)"""
+    w = np.ones(arr.shape[0]) if subj_w is None else np.asarray(subj_w, float)
+    valid = ~np.isnan(arr)
+    num = np.nansum(arr * w[:, None, None], axis=0)
+    den = np.sum(valid * w[:, None, None], axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        m = num / den
+    b = np.maximum(m[:, BEL] - 1, 0)
+    tot = b.sum(axis=1, keepdims=True)
+    tot[tot == 0] = 1.0
+    m[:, BEL] = b / tot
+    return m
+
+
+# =========================================================================
+# 지표
+# =========================================================================
+class Engine:
+    def __init__(self, rows, refs):
+        self.rows = rows
+        self.refs = refs
+        self.scen = rows["scenario_id"].to_numpy()
+        self.scen_ids = sorted(np.unique(self.scen))
+        self.pos = {s: i for i, s in enumerate(self.scen_ids)}
+        self.sidx = np.array([self.pos[s] for s in self.scen])        # 행 -> 시나리오 위치
+        self.n_s = len(self.scen_ids)
+        self.phase = rows["phase_idx"].to_numpy()
+        d = refs["hindsight"][:, BEL] - refs["btom"][:, BEL]
+        self.h_den = (d ** 2).sum(axis=1)
+        self.h_ok = self.h_den >= H_EPS ** 2
+        self.h_dir = d
+
+    def _center(self, x):
+        """시나리오 내 평균 제거"""
+        cnt = np.bincount(self.sidx, minlength=self.n_s)
+        mean = np.bincount(self.sidx, weights=x, minlength=self.n_s) / np.maximum(cnt, 1)
+        return x - mean[self.sidx]
+
+    def per_scenario_mean(self, v, mask):
+        num = np.bincount(self.sidx[mask], weights=v[mask], minlength=self.n_s)
+        cnt = np.bincount(self.sidx[mask], minlength=self.n_s)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(cnt > 0, num / cnt, np.nan)
+
+    def hindsight_by_scenario(self, agg, mask):
+        """시나리오별 Σ(LLM-BToM)·(Hind-BToM) / Σ||Hind-BToM||^2 (mask 안의 스텝만)."""
+        proj = ((agg[:, BEL] - self.refs["btom"][:, BEL]) * self.h_dir).sum(axis=1)
+        m = mask & self.h_ok & ~np.isnan(proj)
+        num = np.bincount(self.sidx[m], weights=proj[m], minlength=self.n_s)
+        den = np.bincount(self.sidx[m], weights=self.h_den[m], minlength=self.n_s)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(den > 0, num / den, np.nan)
+
+    def metrics(self, agg, sw):
+        """agg: (n_rows, 6), sw: 시나리오 가중치(뽑힌 횟수)."""
         out = {}
-        for (score, o, ref), (xy, xs, ys) in self.suff.items():
-            den = np.sqrt((w * xs).sum() * (w * ys).sum())
-            out[f"rm_{score}_{o}_{ref}"] = (w * xy).sum() / den if den > 0 else np.nan
+        rw = sw[self.sidx]
+        # 1) rm_corr
+        for j, col in enumerate(COLS):
+            x = self._center(agg[:, j])
+            for ref in CORR_REFS:
+                y = self._center(self.refs[ref][:, j])
+                ok = ~np.isnan(x) & ~np.isnan(y)
+                den = np.sqrt((rw[ok] * x[ok] ** 2).sum() * (rw[ok] * y[ok] ** 2).sum())
+                out[f"rm_{col}_{ref}"] = (rw[ok] * x[ok] * y[ok]).sum() / den if den > 0 else np.nan
         for score, opts in OPTS.items():
             for ref in CORR_REFS:
                 out[f"rm_{score}_mean_{ref}"] = np.nanmean([out[f"rm_{score}_{o}_{ref}"] for o in opts])
             out[f"rm_{score}_btom_minus_hindsight"] = out[f"rm_{score}_mean_btom"] - out[f"rm_{score}_mean_hindsight"]
+        # 2) VPA (belief): 가중치만큼 행을 복제
+        rep = np.repeat(np.arange(len(agg)), rw.astype(int))
+        y = agg[rep][:, BEL].ravel(order="F")
+        X = np.column_stack([self.refs[r][rep][:, BEL].ravel(order="F") for r in VPA_REFS])
+        ok = ~np.isnan(y) & ~np.isnan(X).any(axis=1)
+        y, X = y[ok], X[ok]
+        keep = X.std(axis=0) > 0
+        names = [r for r, k in zip(VPA_REFS, keep) if k]
+        yz = (y - y.mean()) / y.std()
+        Xz = (X[:, keep] - X[:, keep].mean(axis=0)) / X[:, keep].std(axis=0)
+        full, beta = _adj_r2(yz, Xz, return_beta=True)
+        out["vpa_belief_total"] = full
+        for i, r in enumerate(names):
+            out[f"vpa_belief_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
+            out[f"vpa_belief_beta_{r}"] = beta[i]
+        # 3) hindsight 지수 / 4) |LLM - BToM|
+        all_rows = np.ones(len(agg), bool)
+        h_sc = self.hindsight_by_scenario(agg, all_rows)
+        err = np.abs(agg[:, BEL] - self.refs["btom"][:, BEL]).mean(axis=1)
+        e_sc = self.per_scenario_mean(err, np.ones(len(err), bool))
+        out["hindsight_index"] = _wmean(h_sc, sw)
+        out["abs_err_belief_vs_btom"] = _wmean(e_sc, sw)
+        for p, name in PHASE_NAMES.items():
+            m = self.h_ok & (self.phase == p)
+            if m.any():
+                out[f"hindsight_index_phase{p}"] = _wmean(self.hindsight_by_scenario(agg, self.phase == p), sw)
         return out
 
-    def vpa(self, w):
-        out = {}
-        rows = np.concatenate([np.repeat(self.idx[s], k) for s, k in zip(self.sc, w) if k > 0])
-        d = self.m.iloc[rows]
-        for score, refs in VPA_REFS.items():
-            y = np.concatenate([d[f"{score}_{o}"].values for o in OPTS[score]])
-            X = np.column_stack([np.concatenate([d[f"{r}__{score}_{o}"].values for o in OPTS[score]]) for r in refs])
-            ok = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
-            y, X = y[ok], X[ok]
-            sd = X.std(axis=0)
-            keep = sd > 0
-            y = (y - y.mean()) / y.std()
-            X = (X[:, keep] - X[:, keep].mean(axis=0)) / sd[keep]
-            names = [r for r, k in zip(refs, keep) if k]
-            full, beta = _adj_r2(y, X, return_beta=True)
-            out[f"vpa_{score}_total"] = full
-            for i, r in enumerate(names):
-                out[f"vpa_{score}_unique_{r}"] = full - _adj_r2(y, np.delete(X, i, axis=1))
-                # 표준화 회귀계수: 고유 설명력은 부호를 구분하지 않으므로 방향을 함께 확인해야 함
-                # (예: 예측변수끼리 상관이 높으면 한쪽이 음수가 되는 억제 효과)
-                out[f"vpa_{score}_beta_{r}"] = beta[i]
-        return out
+    def scenario_level(self, agg):
+        """순열 검정용: 시나리오별 hindsight 지수와 |LLM - BToM|."""
+        err = np.abs(agg[:, BEL] - self.refs["btom"][:, BEL]).mean(axis=1)
+        return {"hindsight_index": self.hindsight_by_scenario(agg, np.ones(len(agg), bool)),
+                "abs_err_belief_vs_btom": self.per_scenario_mean(err, np.ones(len(err), bool))}
 
-    def all(self, w=None):
-        w = np.ones(len(self.sc)) if w is None else w
-        return {**self.rm_corr(w), **self.vpa(w)}
+
+def _wmean(v, w):
+    ok = ~np.isnan(v) & (w > 0)
+    return float((v[ok] * w[ok]).sum() / w[ok].sum()) if ok.any() else np.nan
 
 
 def _adj_r2(y, X, return_beta=False):
@@ -180,25 +239,10 @@ def _adj_r2(y, X, return_beta=False):
     return (adj, beta[1:]) if return_beta else adj
 
 
-def boot_weights(scenarios, groups_of, n_boot, seed):
-    """그룹별 층화 시나리오 복원추출 -> 시나리오별 뽑힌 횟수(가중치) 행렬 (n_boot x n_scen)."""
-    rng = np.random.default_rng(seed)
-    pos = {s: i for i, s in enumerate(scenarios)}
-    W = np.zeros((n_boot, len(scenarios)))
-    by_group = {}
-    for s in scenarios:
-        by_group.setdefault(groups_of[s], []).append(s)
-    for b in range(n_boot):
-        for g, ss in by_group.items():
-            for s in rng.choice(ss, size=len(ss), replace=True):
-                W[b, pos[s]] += 1
-    return W
-
-
-# -------------------------------------------------------------------------
-# 그림: 조건별 점추정 + 95% bootstrap CI (forest plot)
-# -------------------------------------------------------------------------
-COND_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]  # 고정 순서 (조건 순서대로)
+# =========================================================================
+# 그림
+# =========================================================================
+COND_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]  # 고정 순서
 PANELS = [
     ("rm_corr with reference (within-scenario)", [
         ("rm_belief_mean_btom", "Belief ~ BToM"),
@@ -213,6 +257,12 @@ PANELS = [
         ("vpa_belief_beta_btom", "BToM"),
         ("vpa_belief_beta_hindsight", "Hindsight"),
     ], None),
+    ("Hindsight index (0 = BToM, 1 = Hindsight)", [
+        ("hindsight_index", "All steps"),
+        ("hindsight_index_phase3", "See G2"),
+        ("hindsight_index_phase5", "Return / Appr G2"),
+        ("hindsight_index_phase6", "Selected"),
+    ], None),
 ]
 
 
@@ -221,13 +271,13 @@ def plot_summary(res, labels, out_path, title):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     base = res[res["condition"].isin(labels)]
-    fig, axes = plt.subplots(1, len(PANELS), figsize=(5.2 * len(PANELS), 3.6), squeeze=False)
+    fig, axes = plt.subplots(1, len(PANELS), figsize=(4.8 * len(PANELS), 3.8), squeeze=False)
     n = len(labels)
     for ax, (ptitle, items, xlim) in zip(axes[0], PANELS):
         for i, (metric, name) in enumerate(items):
             for j, lab in enumerate(labels):
                 row = base[(base["metric"] == metric) & (base["condition"] == lab)]
-                if row.empty:
+                if row.empty or pd.isna(row.iloc[0]["estimate"]):
                     continue
                 r = row.iloc[0]
                 y = i + (j - (n - 1) / 2) * 0.22
@@ -235,6 +285,8 @@ def plot_summary(res, labels, out_path, title):
                 ax.plot(r["estimate"], y, "o", color=COND_COLORS[j], ms=8, markeredgecolor="white",
                         markeredgewidth=1.5, label=lab if i == 0 else None, zorder=3)
         ax.axvline(0, color="#999999", lw=0.8, zorder=0)
+        if "Hindsight index" in ptitle:
+            ax.axvline(1, color="#cccccc", lw=0.8, ls="--", zorder=0)
         ax.set_yticks(range(len(items)))
         ax.set_yticklabels([nm for _, nm in items], fontsize=9.5)
         ax.invert_yaxis()
@@ -254,82 +306,110 @@ def plot_summary(res, labels, out_path, title):
     print(f"✅ saved: {out_path}")
 
 
-# -------------------------------------------------------------------------
+# =========================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", nargs="+", required=True)
     ap.add_argument("--labels", nargs="+", required=True)
-    ap.add_argument("--groups", default="1,4", help="분석할 group_id (기본: Check-GoBack Present/Absent)")
+    ap.add_argument("--groups", default="1,2,3,4,5,6,7", help="분석할 group_id (기본: 전체 7개 그룹 = irrational 제외 73개)")
     ap.add_argument("--n_boot", type=int, default=2000)
+    ap.add_argument("--n_perm", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--per_subject", type=int, default=0,
-                    help="이 번호의 입력에 대해 피험자 1명씩의 지표 분포도 계산 (0-based, -1이면 안 함)")
+    ap.add_argument("--no_subject_boot", action="store_true", help="2단계 대신 시나리오만 리샘플")
+    ap.add_argument("--match_subjects", type=int, default=0,
+                    help="첫 조건에서 k명을 무작위로 뽑아 반복 계산한 분포를 함께 보고 (0이면 안 함)")
+    ap.add_argument("--n_match", type=int, default=200)
     ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--title", default="Stepwise conditions vs reference models (95% scenario-bootstrap CI)")
+    ap.add_argument("--title", default="Stepwise conditions vs reference models (95% bootstrap CI)")
     args = ap.parse_args()
+    assert len(args.input) == len(args.labels), "--input과 --labels 개수가 같아야 합니다."
     os.makedirs(args.out_dir, exist_ok=True)
 
     gids = [int(g) for g in args.groups.split(",")]
     allowed = get_group_indices(include_irrational=False)
     scen_ids = sorted(s for g in gids for s in allowed[g - 1])
-    groups_of = df_btom.groupby("scenario_id")["group_id"].first().to_dict()
 
-    refs = {r: load_reference_everystep(r) for r in sorted(set(CORR_REFS) | set(VPA_REFS["belief"]))}
-
-    raws, mets = [], []
+    raws = []
     for path, label in zip(args.input, args.labels):
         df = load_rows(path)
         df = df[df["scenario_id"].isin(scen_ids)]
-        have = set(df["scenario_id"])
         raws.append(df)
-        print(f"[{label}] subjects={df['subject_id'].nunique()}, scenarios={len(have)}/{len(scen_ids)}")
-        scen_ids = [s for s in scen_ids if s in have]
-    # 모든 조건에 공통으로 있는 시나리오만 사용
-    for df, label in zip(raws, args.labels):
-        m = attach_refs(aggregate(df[df["scenario_id"].isin(scen_ids)]), refs)
-        mets.append(Metrics(m, scen_ids))
+        print(f"[{label}] subjects={df['subject_id'].nunique()}, scenarios={df['scenario_id'].nunique()}/{len(scen_ids)}")
+        scen_ids = [s for s in scen_ids if s in set(df["scenario_id"])]
     print(f"common scenarios: {len(scen_ids)}")
 
-    W = boot_weights(scen_ids, groups_of, args.n_boot, args.seed)
-    point = [mt.all() for mt in mets]
-    boots = [pd.DataFrame([mt.all(w) for w in W]) for mt in mets]
+    rows = row_table(scen_ids)
+    refs = ref_arrays(rows, {r: load_reference_everystep(r) for r in ALL_REFS})
+    eng = Engine(rows, refs)
+    arrays = [subject_array(df[df["scenario_id"].isin(scen_ids)], rows)[0] for df in raws]
+    group_of = df_btom.groupby("scenario_id")["group_id"].first().to_dict()
 
-    def ci(arr):
-        arr = np.asarray(arr, float); arr = arr[~np.isnan(arr)]
-        return (np.percentile(arr, 2.5), np.percentile(arr, 97.5)) if arr.size else (np.nan, np.nan)
+    # 점추정
+    ones = np.ones(eng.n_s)
+    aggs = [aggregate(a) for a in arrays]
+    point = [eng.metrics(g, ones) for g in aggs]
 
-    rows = []
-    for label, pt, bt, df in zip(args.labels, point, boots, raws):
+    # 2단계 bootstrap (시나리오 리샘플은 조건 간 공유)
+    rng = np.random.default_rng(args.seed + 1)
+    B = stratified_boot_indices(eng.scen_ids, group_of, args.n_boot, args.seed)
+    boots = [[] for _ in arrays]
+    for ix in B:
+        sw = np.bincount(ix, minlength=eng.n_s).astype(float)
+        for j, a in enumerate(arrays):
+            if a.shape[0] > 1 and not args.no_subject_boot:
+                subj_w = np.bincount(rng.integers(0, a.shape[0], a.shape[0]), minlength=a.shape[0])
+                g = aggregate(a, subj_w)
+            else:
+                g = aggs[j]
+            boots[j].append(eng.metrics(g, sw))
+    boots = [pd.DataFrame(b) for b in boots]
+
+    out = []
+    for j, (label, pt) in enumerate(zip(args.labels, point)):
         for k, v in pt.items():
-            lo, hi = ci(bt[k])
-            rows.append({"condition": label, "n_subjects": df["subject_id"].nunique(), "metric": k,
-                         "estimate": v, "ci_low": lo, "ci_high": hi})
-    # 조건 간 paired 차이 (첫 조건 대비)
-    for j in range(1, len(mets)):
+            lo, hi = percentile_ci(boots[j][k]) if k in boots[j] else (np.nan, np.nan)
+            out.append(dict(condition=label, n_subjects=arrays[j].shape[0], metric=k, estimate=v, ci_low=lo, ci_high=hi))
+    # 첫 조건 대비 차이
+    sc0 = eng.scenario_level(aggs[0])
+    perm_rows = []
+    for j in range(1, len(arrays)):
+        name = f"{args.labels[j]} - {args.labels[0]}"
         for k in point[0]:
+            if k not in boots[j] or k not in boots[0]:
+                continue
             d = boots[j][k] - boots[0][k]
-            lo, hi = ci(d)
-            p = 2 * min((d > 0).mean(), (d < 0).mean())
-            rows.append({"condition": f"{args.labels[j]} - {args.labels[0]}", "n_subjects": None, "metric": k,
-                         "estimate": point[j][k] - point[0][k], "ci_low": lo, "ci_high": hi, "p_boot": p})
-    res = pd.DataFrame(rows)
+            lo, hi = percentile_ci(d)
+            out.append(dict(condition=name, metric=k, estimate=point[j][k] - point[0][k], ci_low=lo, ci_high=hi,
+                            p_boot=boot_p_two_sided(d)))
+        scj = eng.scenario_level(aggs[j])
+        for k in sc0:
+            diff = scj[k] - sc0[k]
+            mean_d, p = paired_signflip_test(diff, n_perm=args.n_perm, seed=args.seed)
+            out.append(dict(condition=name, metric=f"{k} (scenario-level paired sign-flip)", estimate=mean_d,
+                            p_perm=p, note=f"n_scenarios={int(np.sum(~np.isnan(diff)))}"))
+            perm_rows.append(pd.DataFrame({"scenario_id": eng.scen_ids, "comparison": name, "metric": k,
+                                           args.labels[0]: sc0[k], args.labels[j]: scj[k], "diff": diff}))
 
-    # 피험자 1명씩의 분포
-    if args.per_subject >= 0:
-        df = raws[args.per_subject]
-        subj_rows = []
-        for s in sorted(df["subject_id"].unique()):
-            m = attach_refs(aggregate(df[df["scenario_id"].isin(scen_ids)], subjects=[s]), refs)
-            subj_rows.append({"subject_id": s, **Metrics(m, scen_ids).all()})
-        sub = pd.DataFrame(subj_rows)
-        sub.to_csv(os.path.join(args.out_dir, "per_subject_metrics.csv"), index=False)
-        for k in point[0]:
-            rows.append({"condition": f"{args.labels[args.per_subject]} (1 subject, mean of {len(sub)})",
-                         "n_subjects": 1, "metric": k, "estimate": sub[k].mean(),
-                         "ci_low": sub[k].min(), "ci_high": sub[k].max()})
-        res = pd.DataFrame(rows)
+    # 피험자 수 맞추기
+    if args.match_subjects and arrays[0].shape[0] > args.match_subjects:
+        k = args.match_subjects
+        rngm = np.random.default_rng(args.seed + 2)
+        dist = []
+        for _ in range(args.n_match):
+            pick = rngm.choice(arrays[0].shape[0], size=k, replace=False)
+            dist.append(eng.metrics(aggregate(arrays[0][pick]), ones))
+        dist = pd.DataFrame(dist)
+        for m in dist.columns:
+            lo, hi = percentile_ci(dist[m])
+            out.append(dict(condition=f"{args.labels[0]} ({k} random subjects x {args.n_match})", n_subjects=k,
+                            metric=m, estimate=dist[m].mean(), ci_low=lo, ci_high=hi,
+                            note="ci = 2.5-97.5 percentile over random subsets"))
 
+    res = pd.DataFrame(out)
+    res.insert(0, "n_scenarios", len(scen_ids))
     res.to_csv(os.path.join(args.out_dir, "stepwise_bootstrap_summary.csv"), index=False)
+    if perm_rows:
+        pd.concat(perm_rows).to_csv(os.path.join(args.out_dir, "stepwise_scenario_level.csv"), index=False)
     plot_summary(res, args.labels, os.path.join(args.out_dir, "stepwise_bootstrap_summary.png"), args.title)
     print(f"✅ saved: {os.path.join(args.out_dir, 'stepwise_bootstrap_summary.csv')}")
     return res
