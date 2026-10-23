@@ -87,6 +87,94 @@ def _belief_now_cols(now):
     }
 
 
+def parse_json_lenient(text, prefer="object", required_key=None):
+    """
+    LLM 응답에서 JSON을 관대하게 추출함. 표준 json.loads가 실패한 경우에만 호출하는 복구용.
+
+    처리하는 실패 유형
+      - JSON 앞뒤의 설명문 (설명 안의 중괄호 '{L, M, Empty}' 같은 것 포함)
+      - 중괄호를 두 번 겹쳐 쓴 템플릿 형식 '{{ ... }}'
+      - 작은따옴표 / True·False·None을 쓴 Python dict 형식
+      - 끝에 붙은 쉼표, // 주석
+    prefer: "object" 또는 "array" (먼저 찾을 최상위 형태)
+    required_key: 이 키를 가진 객체를 우선 선택 (예: 'desire_scores')
+    Returns: 파싱된 객체. 실패하면 ValueError.
+    """
+    import re
+    import ast
+
+    t = text.replace("```json", "").replace("```", "").strip()
+    variants = [t]
+    v = t.replace("{{", "{").replace("}}", "}")
+    variants.append(v)
+    v2 = re.sub(r"//[^\n]*", "", v)
+    v2 = re.sub(r",\s*([}\]])", r"\1", v2)
+    variants.append(v2)
+
+    def has_key(o):
+        if required_key is None:
+            return True
+        if isinstance(o, dict):
+            return required_key in o or any(has_key(x) for x in o.values() if isinstance(x, (dict, list)))
+        if isinstance(o, list):
+            return any(has_key(x) for x in o)
+        return False
+
+    openers = "[{" if prefer == "array" else "{["
+    dec = json.JSONDecoder()
+    best = None
+    for cand in variants:
+        for opener in openers:
+            for i, ch in enumerate(cand):
+                if ch != opener:
+                    continue
+                obj = None
+                try:
+                    obj, end = dec.raw_decode(cand, i)
+                except ValueError:
+                    # Python dict 형식 시도: 같은 위치에서 짝이 맞는 괄호까지 잘라 literal_eval
+                    seg = _balanced_segment(cand, i)
+                    if seg:
+                        try:
+                            py = re.sub(r"\btrue\b", "True", re.sub(r"\bfalse\b", "False", re.sub(r"\bnull\b", "None", seg)))
+                            obj = ast.literal_eval(py)
+                            end = i + len(seg)
+                        except Exception:
+                            obj = None
+                if isinstance(obj, (dict, list)) and has_key(obj):
+                    size = end - i
+                    if best is None or size > best[0]:
+                        best = (size, obj)
+            if best is not None:
+                return best[1]
+    raise ValueError("응답에서 유효한 JSON을 찾지 못했습니다.")
+
+
+def _balanced_segment(text, start):
+    """text[start]의 여는 괄호와 짝이 맞는 닫는 괄호까지의 문자열 (따옴표 안은 무시)."""
+    pairs = {"{": "}", "[": "]"}
+    stack, quote, esc = [], None, False
+    for j in range(start, len(text)):
+        c = text[j]
+        if quote:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == quote:
+                quote = None
+            continue
+        if c in ("'", '"'):
+            quote = c
+        elif c in pairs:
+            stack.append(pairs[c])
+        elif stack and c == stack[-1]:
+            stack.pop()
+            if not stack:
+                return text[start:j + 1]
+    return None
+
+
 def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='normal'):
     """
     JSON 응답을 파싱하여 CSV용 Flat Dictionary(또는 List of Dictionaries)로 변환
@@ -101,6 +189,7 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
     # 전역 에러 핸들링 및 유연한 데이터 언패킹을 위해 초기화
     internal_thinking = ""
     raw_json_str = ""
+    recovered = False  # 비표준 JSON을 복구해서 파싱했는지 (CSV parse_recovered 열)
 
     try:
         # 데이터 형태 방어 코드 (딕셔너리로 들어왔을 때와 문자열로 들어왔을 때 분기 처리)
@@ -136,7 +225,15 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
             if start != -1 and end != 0:
                 clean_json = clean_json[start:end]
 
-        data = json.loads(clean_json)
+        try:
+            data = json.loads(clean_json)
+        except ValueError:
+            # 표준 파싱 실패 시에만 복구 시도 (정상 응답은 기존과 완전히 같은 경로)
+            data = parse_json_lenient(raw_json_str,
+                                      prefer="array" if mode == 'everystep' else "object",
+                                      required_key="time_step" if mode == 'everystep' else "desire_scores")
+            recovered = True
+            print(f"💡 [Auto-Fix] Scenario {sc_id}: 비표준 JSON 응답을 복구해 파싱했습니다.")
 
         # ---------------------------------------------------------
         # CASE A: Everystep Mode (List of Objects)
@@ -203,6 +300,8 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
                     'internal_thinking': internal_thinking
                 }
                 row.update(_belief_now_cols(belief_now))
+                if recovered:
+                    row['parse_recovered'] = True
                 parsed_list.append(row)
             
             return parsed_list
@@ -245,6 +344,8 @@ def process_result_json(sc_id, meta, raw_response, model_name, condition, mode='
                 'internal_thinking': internal_thinking
             }
             row.update(_belief_now_cols(belief_now))
+            if recovered:
+                row['parse_recovered'] = True
             return row
         
     except Exception as e:
@@ -296,35 +397,58 @@ def inspect_pickle_data(file_path):
             print(f"{key:<25} | {v_type:<15} | {v_shape:<15}")
 
         # 2. 데이터 무결성 체크 (Data Integrity Check)
+        #    model_data.pkl에 'scenario_ids'(이번 실행에서 시도한 시나리오)가 있으면 그 범위만 점검.
+        #    없으면(사람·레퍼런스 데이터, 이전 버전 pkl) 78개 전체를 점검.
         print("-" * 60)
         print("📊 Data Integrity Check:")
-        
-        # (A) Desire Mean Check
+        ids = data.get('scenario_ids')
+        if ids is None or len(ids) == 0:
+            ids = list(range(1, 79))
+            scope = "78개 전체"
+        else:
+            scope = f"시도한 시나리오 {len(ids)}개" + (f" (mode={data['mode']})" if data.get('mode') else "")
+        idx = np.array(ids, dtype=int) - 1
+        print(f"   점검 범위: {scope}")
+        problems = 0
+
+        # (A) Desire Mean
         if 'des_inf_mean' in data:
-            dm = data['des_inf_mean']
-            nan_count = np.isnan(dm).sum()
-            print(f"\n[1] Desire Mean (des_inf_mean) - First 5 Scenarios:")
-            print(dm[:, :5]) 
-            print(f"   -> Total NaNs: {nan_count}")
-            if nan_count > 0:
-                print("   ⚠️ Alert: NaNs found in mean! Some scenarios might have failed.")
+            dm = np.asarray(data['des_inf_mean'], float)[:, idx]
+            n_nan = int(np.isnan(dm).any(axis=0).sum())
+            out_rng = int(np.sum((dm < 1) | (dm > 7)))
+            print(f"\n[1] Desire Mean - 범위 안 첫 5개 시나리오 {ids[:5]}:")
+            print(np.round(dm[:, :5], 2))
+            print(f"   -> 평균값이 없는 시나리오: {n_nan} / {len(ids)}" + (f", 1~7 범위 밖: {out_rng}" if out_rng else ""))
+            problems += n_nan + out_rng
 
-        # (B) Belief Mean Check
+        # (B) Belief Mean (정규화 후 합 = 1)
         if 'bel_inf_mean_norm' in data:
-            bm = data['bel_inf_mean_norm']
-            col_sums = np.nansum(bm[:, :5], axis=0)
-            print(f"\n[2] Belief Mean Normalized - First 5 Scenarios:")
-            print(bm[:, :5])
-            print(f"   -> Column Sums (Target ~1.0): {np.round(col_sums, 2)}")
+            bm = np.asarray(data['bel_inf_mean_norm'], float)[:, idx]
+            sums = np.nansum(bm, axis=0)
+            has = ~np.isnan(bm).all(axis=0)
+            off = int(np.sum(has & (np.abs(sums - 1) > 1e-6)))
+            print(f"\n[2] Belief Mean Normalized - 범위 안 첫 5개 시나리오 {ids[:5]}:")
+            print(np.round(bm[:, :5], 3))
+            print(f"   -> 값이 있는 시나리오 {int(has.sum())}개 중 합이 1이 아닌 시나리오: {off}"
+                  + ("  (모든 옵션이 1점이면 합이 0)" if off else ""))
+            problems += off
 
-        # (C) Raw Data Sample
+        # (C) 피험자별 완결성
         if 'des_inf' in data:
-            raw_d = data['des_inf']
-            # shape가 (Rating, Condition, Subject)라고 가정
-            n_subj = raw_d.shape[2] if len(raw_d.shape) > 2 else 0
-            print(f"\n[3] Raw Desire Data (des_inf) - Scenario 1, First {min(3, n_subj)} Subjects:")
-            if n_subj > 0:
-                print(raw_d[:, 0, :min(3, n_subj)]) 
+            raw_d = np.asarray(data['des_inf'], float)
+            n_subj = raw_d.shape[2] if raw_d.ndim > 2 else 0
+            if n_subj:
+                per_subj = (~np.isnan(raw_d[0][idx])).sum(axis=0)
+                print(f"\n[3] 피험자별 최종값이 있는 시나리오 수 (범위 {len(ids)}개 기준):")
+                print("   " + ", ".join(f"S{i + 1:02d}={c}" for i, c in enumerate(per_subj)))
+                incomplete = data.get('incomplete') or {}
+                for subj, scs in incomplete.items():
+                    print(f"   ⚠️ subject {subj:02d}: 최종값 없음 {len(scs)}개 -> {scs[:15]}{' ...' if len(scs) > 15 else ''}")
+                # (결측 시나리오는 [1]에서 이미 셌으므로 여기서는 목록만 보여줌)
+
+        print("\n" + ("✅ 점검 범위 안에서 문제 없음" if problems == 0
+                      else f"⚠️ 점검 범위 안에서 확인이 필요한 항목 {problems}개"))
+        return problems
 
     except Exception as e:
         print(f"❌ Error reading pickle: {e}")

@@ -217,56 +217,73 @@ def process_model_results(target_dir, mode='normal'):
     has_belief_now = False
 
     # 3. 데이터 로드 및 Matrix 변환
+    #    - 실제로 시도한(어느 피험자 CSV에든 등장한) 시나리오만 진단 대상으로 삼음
+    #      (--scenarios goback / rational 처럼 일부만 돌린 실행에서 나머지를 결측으로 세지 않도록)
+    #    - stepwise(everystep / prefixstep)는 '그 시나리오의 실제 마지막 스텝' 행만 최종 판단으로 사용.
+    #      마지막 스텝이 없거나 오류면 더 이른 스텝으로 대체하지 않고 NaN으로 남김.
+    from dataset import df_btom
+    expected_last = df_btom.groupby('scenario_id')['time_step'].max().to_dict()
+    score_cols = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
+
+    attempted = set()
+    incomplete = {}   # subject -> [scenario_id]: 시도했지만 최종값을 얻지 못한 시나리오
     for subj_idx, file_path in enumerate(csv_files):
         df = pd.read_csv(file_path)
-        
-        # 1부터 78까지 시나리오 ID를 순회하며 정확한 자리에 데이터 삽입 (누락 방지)
-        for sc_idx in range(n_cond):
-            sc_id = sc_idx + 1 # 1-based scenario_id
-            
-            sc_df = df[df['scenario_id'] == sc_id]
-            if sc_df.empty:
-                continue # API 실패 등으로 데이터가 없으면 NaN 유지
-                
-            # Mode에 따른 데이터 추출
-            if mode in STEPWISE_MODES:
-                sc_df = sc_df.sort_values('time_step')
+        attempted |= set(df['scenario_id'].dropna().astype(int))
+        ok_rows = df[df['error'].isna()] if 'error' in df.columns else df
+        missing_here = []
 
-            # Desire와 Belief 모두 최종 판단(사후 추론) 결과를 가져옴
+        for sc_id in sorted(set(df['scenario_id'].dropna().astype(int))):
+            sc_idx = sc_id - 1
+            sc_df = ok_rows[ok_rows['scenario_id'] == sc_id]
+            if mode in STEPWISE_MODES:
+                sc_df = sc_df[pd.to_numeric(sc_df['time_step'], errors='coerce') == expected_last[sc_id]]
+            sc_df = sc_df.dropna(subset=[c for c in score_cols if c in sc_df.columns])
+            if sc_df.empty:
+                missing_here.append(sc_id)
+                continue
             row_final = sc_df.iloc[-1]
 
-            # Desire 데이터 채우기 (K, L, M)
-            if 'desire_K' in row_final:
-                des_inf[0, sc_idx, subj_idx] = row_final['desire_K']
-                des_inf[1, sc_idx, subj_idx] = row_final['desire_L']
-                des_inf[2, sc_idx, subj_idx] = row_final['desire_M']
-
-            # Belief 데이터 채우기 (L, M, Empty)
-            if 'belief_L' in row_final:
-                bel_inf[0, sc_idx, subj_idx] = row_final['belief_L']
-                bel_inf[1, sc_idx, subj_idx] = row_final['belief_M']
-                bel_inf[2, sc_idx, subj_idx] = row_final['belief_Empty']
+            des_inf[:, sc_idx, subj_idx] = [row_final['desire_K'], row_final['desire_L'], row_final['desire_M']]
+            bel_inf[:, sc_idx, subj_idx] = [row_final['belief_L'], row_final['belief_M'], row_final['belief_Empty']]
 
             # Current belief (current_belief 실험일 때만 존재)
-            if 'belief_now_L' in row_final:
+            if 'belief_now_L' in row_final and pd.notna(row_final['belief_now_L']):
                 has_belief_now = True
-                bel_now_inf[0, sc_idx, subj_idx] = row_final['belief_now_L']
-                bel_now_inf[1, sc_idx, subj_idx] = row_final['belief_now_M']
-                bel_now_inf[2, sc_idx, subj_idx] = row_final['belief_now_Empty']
+                bel_now_inf[:, sc_idx, subj_idx] = [row_final['belief_now_L'], row_final['belief_now_M'],
+                                                    row_final['belief_now_Empty']]
+        if missing_here:
+            incomplete[subj_idx + 1] = missing_here
+
+    attempted = sorted(attempted)
+    att_idx = np.array(attempted, dtype=int) - 1
 
     # -------------------------------------------------------------------------
-    # 🌟 [추가] Raw Data의 결측치(NaN) 현황 터미널 출력
+    # [Diagnostics] 시도한 시나리오 범위 안에서만 결측 / 범위 이상 점검
     # -------------------------------------------------------------------------
-    nan_count_des = np.isnan(des_inf).sum()
-    nan_count_bel = np.isnan(bel_inf).sum()
-    total_cells = des_inf.size
-    print(f"📊 [Diagnostics] 결측치 현황:")
-    print(f"   - Desire 결측치: {nan_count_des}건 (전체 {total_cells}개 중)")
-    print(f"   - Belief 결측치: {nan_count_bel}건 (전체 {total_cells}개 중)")
+    n_cells = len(attempted) * n_subj
+    miss_cells = int(np.isnan(des_inf[0][att_idx]).sum())
+    print(f"📊 [Diagnostics] 시도한 시나리오 {len(attempted)}개 x 피험자 {n_subj}명 = {n_cells}칸 "
+          f"(78개 중 나머지 {78 - len(attempted)}개는 이번 실행 범위 밖이라 진단에서 제외)")
+    print(f"   - 최종값을 얻은 칸: {n_cells - miss_cells} / {n_cells}"
+          + ("" if miss_cells == 0 else f"  ⚠️ 결측 {miss_cells}칸"))
+    for subj, scs in incomplete.items():
+        print(f"     · subject {subj:02d}: 최종값 없음 {len(scs)}개 -> 시나리오 {scs[:15]}{' ...' if len(scs) > 15 else ''}")
+    if miss_cells and mode in STEPWISE_MODES:
+        print("     (stepwise는 마지막 스텝이 없거나 오류인 시나리오를 결측으로 둡니다. "
+              "실험 명령을 다시 실행하면 빠진 부분만 다시 호출합니다.)")
+    vals_des = des_inf[:, att_idx, :]
+    vals_bel = bel_inf[:, att_idx, :]
+    bad_range = int(np.sum((vals_des < 1) | (vals_des > 7)) + np.sum((vals_bel < 1) | (vals_bel > 7)))
+    if bad_range:
+        print(f"   ⚠️ 1~7 범위를 벗어난 평정 {bad_range}개 (응답 형식 점검 필요)")
     # -------------------------------------------------------------------------
 
     # 4. 통계 계산 (Mean, SE, Norm)
     # shape: (Rating, Condition) -> subject을 모두 합쳤으므로
+    # 범위 밖 시나리오·피험자 1명 SE 등에서 나오는 빈 평균 경고는 정상 동작이라 숨김
+    import warnings
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
     des_inf_mean = np.nanmean(des_inf, axis=2)
     bel_inf_mean = np.nanmean(bel_inf, axis=2)
 
@@ -325,7 +342,11 @@ def process_model_results(target_dir, mode='normal'):
         'bel_inf_group_mean': bel_inf_group_mean,
         'des_inf_group_sd': des_inf_group_sd,
         'bel_inf_group_sd': bel_inf_group_sd,
-        'group_mapping': groups_raw
+        'group_mapping': groups_raw,
+        # 실행 범위 정보 (inspect_pickle_data와 분석 코드가 시도한 시나리오만 보도록)
+        'scenario_ids': attempted,
+        'incomplete': incomplete,
+        'mode': mode,
     }
 
     if has_belief_now:

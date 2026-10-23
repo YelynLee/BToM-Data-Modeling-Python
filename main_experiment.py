@@ -17,7 +17,7 @@ if src_path not in sys.path:
 from src.dataset import df_btom
 from src.prompts import generate_scenario_prompt
 from src.api_client import call_model_api
-from src.utils import process_result_json, inspect_pickle_data
+from src.utils import process_result_json, inspect_pickle_data, parse_json_lenient
 from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES, SCENARIO_SUBSETS,
                         mode_folder, get_scenario_subset)
 from src.data_processor import process_model_results
@@ -155,7 +155,13 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
         try:
             clean_str = raw.replace("```json", "").replace("```", "").strip()
             start, end = clean_str.find('{'), clean_str.rfind('}') + 1
-            parsed = json.loads(clean_str[start:end] if start != -1 else clean_str)
+            try:
+                parsed = json.loads(clean_str[start:end] if start != -1 else clean_str)
+            except ValueError:
+                # 비표준 응답 복구 (설명문 속 중괄호, Python dict 형식 등)
+                parsed = parse_json_lenient(raw, prefer="object",
+                                            required_key="q1_first_position" if mode == "control" else None)
+                parsed["parse_recovered"] = True
             res = {'scenario_id': sc_id, 'model': model_name, 'condition': condition, 'mode': mode,
                    'response_json': json.dumps(parsed)}
             res.update({k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in parsed.items()})
@@ -171,6 +177,51 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
         for r in rows:
             r['time_step'] = t_cut  # 로그를 자른 길이 = 이 응답이 대응하는 시점
     return rows
+
+
+# =========================================================================
+# 오류 행 재파싱: 원문(raw_response)이 남아 있는 파싱 실패 행을 API 호출 없이 다시 읽음
+# =========================================================================
+CARRY_COLS = ['thinking_setting', 'temperature', 'effort', 'output_tokens', 'input_tokens', 'thinking_chars',
+              'stop_reason', 'belief_order', 'internal_thinking']
+
+
+def reparse_error_rows(filename, units, mode, condition, model_name):
+    """
+    파서가 개선되기 전에 실패한 행을 저장된 원문으로 다시 파싱해 CSV를 갱신함.
+    Returns: 복구한 작업 단위 수
+    """
+    if not os.path.exists(filename):
+        return 0
+    df = pd.read_csv(filename)
+    if 'error' not in df.columns or 'raw_response' not in df.columns:
+        return 0
+    unit_by_key = {u[0]: u for u in units}
+    keep, fixed = [], 0
+    for _, r in df.iterrows():
+        raw = r.get('raw_response')
+        if pd.isna(r.get('error')) or not isinstance(raw, str) or not raw.strip():
+            keep.append(r.to_dict())
+            continue
+        t_cut = int(r['time_step']) if mode == "prefixstep" and pd.notna(r.get('time_step')) else None
+        unit = unit_by_key.get((int(r['scenario_id']), t_cut))
+        if unit is None:
+            keep.append(r.to_dict())
+            continue
+        rows = parse_response(raw, unit[1], unit[2], make_meta(unit[3]), model_name, condition, mode)
+        if 'error' in rows[0]:
+            keep.append(r.to_dict())
+            continue
+        for new in rows:
+            for c in CARRY_COLS + [c for c in df.columns if c.startswith('probe_')]:
+                if c in r and pd.notna(r[c]) and c not in new:
+                    new[c] = r[c]
+            new['reparsed_offline'] = True
+        keep.extend(rows)
+        fixed += 1
+    if fixed:
+        pd.DataFrame(keep).to_csv(filename, index=False)
+    return fixed
 
 
 # =========================================================================
@@ -229,10 +280,25 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
         pending = [state["batches"][-1]]
 
     # 2) 끝날 때까지 대기
+    #    request_counts는 API가 보고하는 값을 그대로 보여줌. 처리 중에는 succeeded가 0으로 머물다가
+    #    batch가 끝날 때 한꺼번에 바뀌는 경우가 있어, 경과 시간을 함께 표시하고 같은 상태는 한 줄로 줄임.
     for b in pending:
+        t0, last = time.time(), None
         while True:
             status, counts = get_claude_batch(b["id"])
-            print(f"⏳ [{time.strftime('%H:%M:%S')}] {b['id']}: {status} {counts}")
+            elapsed = int(time.time() - t0)
+            poll_state = (status, tuple(sorted(counts.items())))
+            done = sum(v or 0 for k, v in counts.items() if k != "processing")
+            total = done + (counts.get("processing") or 0)
+            if poll_state != last or status == "ended":
+                print(f"⏳ [{time.strftime('%H:%M:%S')}] {b['id']}: {status} | 완료 {done}/{total} "
+                      f"(succeeded {counts.get('succeeded')}, errored {counts.get('errored')}, "
+                      f"expired {counts.get('expired')}) | 경과 {elapsed // 60}분 {elapsed % 60}초")
+                if status != "ended" and done == 0:
+                    print("   (처리 중에는 완료 수가 0으로 보이다가 끝날 때 한꺼번에 갱신될 수 있습니다)")
+            else:
+                print(f"   ... {status}, 경과 {elapsed // 60}분 {elapsed % 60}초", end="\r")
+            last = poll_state
             if status == "ended":
                 break
             time.sleep(poll_seconds)
@@ -264,9 +330,14 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
         b["collected"] = True
         b["collected_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save_state()
-        n_fail = sum(1 for d in by_subject.values() for rows in d.values() if 'error' in rows[0])
-        print(f"✅ Batch {b['id']} 결과 반영 완료 (피험자 {len(by_subject)}명, 실패 {n_fail}건)")
-        if n_fail:
+        all_rows = [rows for d in by_subject.values() for rows in d.values()]
+        n_api_fail = sum(1 for rows in all_rows if str(rows[0].get('error', '')).startswith('batch '))
+        n_parse_fail = sum(1 for rows in all_rows if 'error' in rows[0]) - n_api_fail
+        n_recovered = sum(1 for rows in all_rows if rows[0].get('parse_recovered'))
+        print(f"✅ Batch {b['id']} 결과 반영 완료: 피험자 {len(by_subject)}명, 응답 {len(all_rows)}건 "
+              f"(API 실패 {n_api_fail}, 파싱 실패 {n_parse_fail}, 비표준 JSON 복구 {n_recovered})")
+        if n_api_fail or n_parse_fail:
+            print("   ↪ API의 succeeded는 '응답을 받음'이라는 뜻이라, 받은 응답의 파싱 실패는 별도로 셉니다.")
             print("   ↪ 같은 명령을 다시 실행하면 실패한 요청만 새 batch로 다시 제출합니다.")
 
 
@@ -394,6 +465,12 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
             results = {}
         return filename, results
 
+    # 이전 실행에서 파싱에 실패한 행 중 원문이 남아 있는 것은 API 호출 없이 먼저 다시 파싱
+    n_fixed = sum(reparse_error_rows(os.path.join(save_dir, f"subject_{i:02d}.csv"), units, mode, condition, model_name)
+                  for i in range(1, num_subjects + 1))
+    if n_fixed:
+        print(f"🛠️ 저장된 원문으로 다시 파싱해 복구한 작업 단위: {n_fixed}개 (API 호출 없음)")
+
     if batch:
         run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_call, to_rows,
                   effort, thinking, temperature, batch_poll)
@@ -434,8 +511,11 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     # 실험 종료 후 자동으로 Pickle 변환 실행
     print("\n🔄 실험 데이터 후처리(Pickle 변환) 시작...")
     process_model_results(save_dir, mode=mode)
-    inspect_pickle_data(os.path.join(save_dir, "model_data.pkl"))
-    print("\n✨ 모든 실험 및 데이터 검증 성공")
+    problems = inspect_pickle_data(os.path.join(save_dir, "model_data.pkl"))
+    if problems:
+        print("\n⚠️ 실험은 끝났지만 위 점검 항목을 확인해 주세요. 같은 명령을 다시 실행하면 빠진 부분만 다시 호출합니다.")
+    else:
+        print("\n✨ 모든 실험 및 데이터 검증 성공")
 
 
 if __name__ == "__main__":
