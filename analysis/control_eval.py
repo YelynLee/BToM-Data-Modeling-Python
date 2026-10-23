@@ -30,6 +30,8 @@ from src.config import BASE_RESULTS_DIR, BEHAVIOR_GROUPS
 from src.control_items import ground_truth, score_response, ITEMS, NUMERIC_ITEMS
 
 PROBE_COLS = ['probe_t1', 'probe_t2a', 'probe_t2b', 'probe_t9']
+# 질문 해석 문항(q13)용 probe (이 문항이 없던 이전 버전 결과에도 동작하도록 선택적으로 사용)
+OPTIONAL_PROBE_COLS = ['probe_t13', 'probe_q13a_order', 'probe_q13b_order']
 
 
 def load_results(input_dir):
@@ -56,10 +58,13 @@ def score_all(df):
             rows.append(base)
             continue
         probes = {c: int(r[c]) for c in PROBE_COLS}
+        probes.update({c: r[c] for c in OPTIONAL_PROBE_COLS if c in r and not pd.isna(r[c])})
         gt = ground_truth(scen[base['scenario_id']], probes)
         sc = score_response(r, gt)
         out = dict(base, parse_error=False, **probes)
         for k in ITEMS:
+            if gt.get(k) is None:
+                continue  # 이전 버전 결과에는 없는 문항
             out[f'{k}_pred'] = r.get(k)
             out[f'{k}_gt'] = json.dumps(gt[k]) if isinstance(gt[k], dict) else gt[k]
         for k in ('q5_shortest_moves_spot1', 'q6_shortest_moves_spot2'):
@@ -79,7 +84,13 @@ def summarize(scored):
     def block(d, label):
         rec = {'scope': label, 'n_rows': len(d)}
         for k in ITEMS:
-            rec[f'{k}_acc'] = d[f'{k}_correct'].mean()
+            if f'{k}_gt' in d.columns:
+                rec[f'{k}_acc'] = d.loc[d[f'{k}_gt'].notna(), f'{k}_correct'].mean()
+        # 질문 해석 문항: 어떤 해석을 골랐는지 비율 (a=정답, b=current, c=hindsight/정답 대상, d=기타)
+        for k in ('q13a_question_meaning', 'q13b_question_meaning'):
+            if f'{k}_choice' in d.columns:
+                for cid in 'abcd':
+                    rec[f'{k}_choice_{cid}'] = (d[f'{k}_choice'] == cid).mean()
         for k in NUMERIC_ITEMS:
             rec[f'{k}_mae'] = pd.to_numeric(d[f'{k}_abs_err'], errors='coerce').mean()
         for k in ('q5_shortest_moves_spot1', 'q6_shortest_moves_spot2'):
@@ -102,6 +113,8 @@ def print_report(summ, scored):
     print(f"📋 Control 채점 결과 (rows={int(allrow['n_rows'])}, parse errors={int(scored['parse_error'].sum())})")
     print("=" * 60)
     for k in ITEMS:
+        if f'{k}_acc' not in allrow or pd.isna(allrow[f'{k}_acc']):
+            continue
         line = f"  {k:<28} acc = {allrow[f'{k}_acc']:.3f}"
         if k in NUMERIC_ITEMS:
             line += f"   MAE = {allrow[f'{k}_mae']:.2f}"
@@ -109,6 +122,11 @@ def print_report(summ, scored):
             line += f"   (unbounded acc = {allrow[f'{k}_acc_unbounded']:.3f})"
         print(line)
     print(f"  {'overall':<28} acc = {allrow['overall_acc']:.3f}")
+    names = {'a': '정답', 'b': 'current 해석', 'c': 'q13a: 실제 트럭 / q13b: hindsight 해석', 'd': '기타'}
+    for k in ('q13a_question_meaning', 'q13b_question_meaning'):
+        if f'{k}_choice_a' in allrow:
+            dist = ", ".join(f"{cid}({names[cid]})={allrow[f'{k}_choice_{cid}']:.2f}" for cid in 'abcd')
+            print(f"  {k} 선택 분포: {dist}")
 
 
 def main():

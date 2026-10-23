@@ -18,7 +18,7 @@ from src.dataset import df_btom
 from src.prompts import generate_scenario_prompt
 from src.api_client import call_model_api
 from src.utils import process_result_json, inspect_pickle_data
-from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES,
+from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES, SCENARIO_SUBSETS,
                         mode_folder, get_scenario_subset)
 from src.data_processor import process_model_results
 from src.control_items import sample_probes
@@ -174,12 +174,110 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
 
 
 # =========================================================================
+# Batch 실행 (Claude Message Batches API)
+# =========================================================================
+def _custom_id(subject_idx, key):
+    sc_id, t_cut = key
+    return f"s{subject_idx:02d}_sc{int(sc_id):02d}_t{int(t_cut or 0):02d}"
+
+
+def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_call, to_rows,
+              effort, thinking, temperature, poll_seconds=60):
+    """
+    남은 작업 단위를 모든 피험자에 걸쳐 하나의 Batch로 제출하고, 끝나면 결과를 피험자별 CSV에 기록함.
+    - 요청은 서로 독립적으로 처리됨 (호출마다 새 대화)
+    - batch_state.json에 제출한 batch id를 남겨, 중간에 멈춰도 같은 명령으로 다시 실행하면
+      재제출하지 않고 기존 batch를 이어서 기다렸다가 결과를 가져옴
+    - 실패(errored/expired, 파싱 오류)한 요청은 체크포인트에 '미완료'로 남아 다음 실행 때 다시 제출됨
+    """
+    from src.api_client import (build_claude_params, parse_claude_message, submit_claude_batch,
+                                get_claude_batch, iter_claude_batch_results)
+    if "claude" not in model_name:
+        raise ValueError("--batch는 현재 Claude 모델에서만 지원됩니다.")
+
+    state_path = os.path.join(save_dir, "batch_state.json")
+    state = json.load(open(state_path)) if os.path.exists(state_path) else {"batches": []}
+
+    def save_state():
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+
+    unit_by_key = {u[0]: u for u in units}
+    pending = [b for b in state["batches"] if not b.get("collected")]
+
+    # 1) 아직 결과를 가져오지 않은 batch가 없으면 남은 작업을 새로 제출
+    if not pending:
+        requests, n_left = [], 0
+        for subject_idx in range(1, num_subjects + 1):
+            _, results = load_subject(subject_idx)
+            for unit in units:
+                if unit[0] in results:
+                    continue
+                sys_prompt, user_prompt, _, _ = prepare_call(subject_idx, unit)
+                params, _ = build_claude_params(model_name, sys_prompt, user_prompt, effort, thinking, temperature)
+                requests.append((_custom_id(subject_idx, unit[0]), params))
+                n_left += 1
+        if not requests:
+            print("⏩ 모든 작업 단위가 이미 완료되었습니다.")
+            return
+        print(f"📤 Batch 제출: 요청 {len(requests)}개 (피험자 {num_subjects}명)")
+        batch_id = submit_claude_batch(requests)
+        state["batches"].append({"id": batch_id, "n_requests": len(requests),
+                                 "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+        save_state()
+        print(f"   batch id: {batch_id}  (상태 파일: {state_path})")
+        pending = [state["batches"][-1]]
+
+    # 2) 끝날 때까지 대기
+    for b in pending:
+        while True:
+            status, counts = get_claude_batch(b["id"])
+            print(f"⏳ [{time.strftime('%H:%M:%S')}] {b['id']}: {status} {counts}")
+            if status == "ended":
+                break
+            time.sleep(poll_seconds)
+
+        # 3) 결과 수집 -> 피험자별 CSV에 반영
+        params_meta = {}
+        by_subject = {}
+        for cid, kind, payload in iter_claude_batch_results(b["id"]):
+            subj = int(cid[1:3]); sc = int(cid.split("_sc")[1].split("_")[0]); t = int(cid.split("_t")[1])
+            key = (sc, t if t else None)
+            unit = unit_by_key.get(key)
+            if unit is None:
+                continue  # 이번 실행 범위 밖의 요청 (예: 시나리오 범위를 바꾼 경우)
+            sys_prompt, user_prompt, order, probes = prepare_call(subj, unit)
+            if kind == "succeeded":
+                if subj not in params_meta:
+                    params_meta[subj] = build_claude_params(model_name, "", "", effort, thinking, temperature)[1]
+                response = parse_claude_message(payload, params_meta[subj])
+                rows = to_rows(response, unit, order, probes)
+            else:
+                rows = [{'scenario_id': sc, 'time_step': unit[2], 'error': f'batch {kind}: {payload}',
+                         'model': model_name}]
+            by_subject.setdefault(subj, {})[key] = rows
+
+        for subj, new_rows in sorted(by_subject.items()):
+            filename, results = load_subject(subj)
+            results.update(new_rows)
+            save_rows(results, filename)
+        b["collected"] = True
+        b["collected_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_state()
+        n_fail = sum(1 for d in by_subject.values() for rows in d.values() if 'error' in rows[0])
+        print(f"✅ Batch {b['id']} 결과 반영 완료 (피험자 {len(by_subject)}명, 실패 {n_fail}건)")
+        if n_fail:
+            print("   ↪ 같은 명령을 다시 실행하면 실패한 요청만 새 batch로 다시 제출합니다.")
+
+
+# =========================================================================
 # 메인 실험 루프
 # =========================================================================
 def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, version="",
                    scenarios="all", scenario_ids=None, current_belief=False,
                    belief_order="random", mask_hidden=False, preview=False,
-                   legacy_wording=False, order_seed=0, thinking="default", temperature=None):
+                   legacy_wording=True, order_seed=0, thinking="default", temperature=None,
+                   batch=False, batch_poll=60):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
@@ -194,7 +292,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     if current_belief or mask_hidden:
         print(f"   -> current_belief={current_belief} (order={belief_order}), mask_hidden={mask_hidden}")
     if mode in STEPWISE_MODES:
-        print(f"   -> belief wording: {'legacy (기존 문구)' if legacy_wording else 'only given the information up to step t'}")
+        print(f"   -> belief wording: {'논문과 같은 문구 (legacy)' if legacy_wording else 'only given the information up to step t (--new_wording)'}")
 
     # 저장 경로: results/{model}/{condition}[/{mode_folder}][/effort_x]
     # 예) results/gpt-4o/vanilla/prefixstep_cur/
@@ -256,66 +354,76 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     os.makedirs(save_dir, exist_ok=True)
     print(f"📂 결과 저장 경로: {save_dir}")
 
-    for subject_idx in range(1, num_subjects + 1):
-        filename = os.path.join(save_dir, f"subject_{subject_idx:02d}.csv")
+    # 호출 1회 준비 / 응답 -> 행 변환 (단건 호출과 Batch가 같은 코드를 사용)
+    def prepare_call(subject_idx, unit):
+        key, sc_id, t_cut, df_input = unit
+        order = resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, order_seed)
+        # control: 피험자마다 다른 시점을 묻도록 probe를 (seed, subject, scenario)로 추출
+        probes = sample_probes(df_input, subject_idx, order_seed) if mode == "control" else None
+        sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
+                                                           control_probes=probes, **prompt_kwargs)
+        return sys_prompt, user_prompt, order, probes
 
-        # [체크포인트] 기존 파일에서 완료된 작업 단위 복원
+    def to_rows(response, unit, order, probes):
+        key, sc_id, t_cut, df_input = unit
+        if response:
+            rows = parse_response(response, sc_id, t_cut, make_meta(df_input), model_name, condition, mode)
+            if 'error' in rows[0]:
+                tag = f"Scenario {sc_id}" + (f", t={t_cut}" if t_cut else "")
+                print(f"\n⚠️ [Parsing Error] {tag}: {rows[0]['error']}")
+        else:
+            rows = [{'scenario_id': sc_id, 'time_step': t_cut, 'error': 'API Fail', 'model': model_name}]
+        if current_belief:
+            for r in rows:
+                r['belief_order'] = order  # 분석에서 순서 효과를 확인할 수 있도록 기록
+        if probes:
+            for r in rows:
+                r.update(probes)  # 채점 시 같은 시점으로 정답을 계산하기 위해 저장
+        meta_info = response.get("meta") if isinstance(response, dict) else None
+        if meta_info:
+            for r in rows:
+                r.update(meta_info)  # thinking 설정, temperature, 출력 토큰 수 등
+        return rows
+
+    def load_subject(subject_idx):
+        filename = os.path.join(save_dir, f"subject_{subject_idx:02d}.csv")
         try:
             results = load_completed_units(filename, mode, current_belief, expected_counts)
         except Exception as e:
-            print(f"\n⚠️ 기존 파일 읽기 실패. 덮어쓰고 새로 시작합니다: {e}")
+            print(f"\n⚠️ 기존 파일 읽기 실패. 새로 시작합니다: {e}")
             results = {}
+        return filename, results
 
-        todo = [u for u in units if u[0] not in results]
-        if not todo:
-            print(f"\n⏩ Subject {subject_idx:02d}/{num_subjects} 이미 완료됨. 건너뜁니다! ({filename})")
-            continue
-        if results:
-            print(f"\n🔄 Subject {subject_idx:02d}/{num_subjects} 복구 시작: "
-                  f"{len(todo)}개 작업 단위 남음 ({len(results)}/{len(units)} 완료)")
+    if batch:
+        run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_call, to_rows,
+                  effort, thinking, temperature, batch_poll)
+    else:
+        for subject_idx in range(1, num_subjects + 1):
+            filename, results = load_subject(subject_idx)
+            todo = [u for u in units if u[0] not in results]
+            if not todo:
+                print(f"\n⏩ Subject {subject_idx:02d}/{num_subjects} 이미 완료됨. 건너뜁니다! ({filename})")
+                continue
+            if results:
+                print(f"\n🔄 Subject {subject_idx:02d}/{num_subjects} 복구 시작: "
+                      f"{len(todo)}개 작업 단위 남음 ({len(results)}/{len(units)} 완료)")
+            print(f"\n=== Subject {subject_idx}/{num_subjects} 진행 중 ===")
 
-        print(f"\n=== Subject {subject_idx}/{num_subjects} 진행 중 ===")
-
-        for key, sc_id, t_cut, df_input in tqdm(todo, desc=f"Subj {subject_idx}"):
-            meta = make_meta(df_input)
-
-            # 프롬프트 생성 (prefixstep이면 df_input이 1..t로 잘려 있음)
-            order = resolve_belief_order(belief_order, subject_idx, sc_id, t_cut, order_seed)
-            # control: 피험자마다 다른 시점을 묻도록 probe를 (seed, subject, scenario)로 추출
-            probes = sample_probes(df_input, subject_idx, order_seed) if mode == "control" else None
-            sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
-                                                               control_probes=probes, **prompt_kwargs)
-
-            # 모델 호출
-            response_str = call_model_api(model_name, sys_prompt, user_prompt, effort=effort,
+            for unit in tqdm(todo, desc=f"Subj {subject_idx}"):
+                sys_prompt, user_prompt, order, probes = prepare_call(subject_idx, unit)
+                response = call_model_api(model_name, sys_prompt, user_prompt, effort=effort,
                                           thinking=thinking, temperature=temperature)
+                results[unit[0]] = to_rows(response, unit, order, probes)
+                save_rows(results, filename)  # 작업 단위마다 저장 -> 중간에 끊겨도 이어서 진행 가능
+                time.sleep(2 if "o1" in model_name else 0.5)  # Rate Limit 방지
 
-            if response_str:
-                rows = parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode)
-                if 'error' in rows[0]:
-                    tag = f"Scenario {sc_id}" + (f", t={t_cut}" if t_cut else "")
-                    print(f"\n⚠️ [Parsing Error] {tag}: {rows[0]['error']}")
-            else:
-                rows = [{'scenario_id': sc_id, 'time_step': t_cut, 'error': 'API Fail', 'model': model_name}]
+            print(f"✅ Subject {subject_idx} Saved.")
 
-            if current_belief:
-                for r in rows:
-                    r['belief_order'] = order  # 분석에서 순서 효과를 확인할 수 있도록 기록
-            if probes:
-                for r in rows:
-                    r.update(probes)  # 채점 시 같은 시점으로 정답을 계산하기 위해 저장
-            meta_info = response_str.get("meta") if isinstance(response_str, dict) else None
-            if meta_info:
-                for r in rows:
-                    r.update(meta_info)  # thinking 설정, temperature, 출력 토큰 수 등
-
-            results[key] = rows
-            save_rows(results, filename)  # 작업 단위마다 저장 -> 중간에 끊겨도 이어서 진행 가능
-
-            # Rate Limit 방지 (o1은 더 길게)
-            time.sleep(2 if "o1" in model_name else 0.5)
-
-        print(f"✅ Subject {subject_idx} Saved.")
+        # 남은 오류(API 실패, 파싱 오류) 안내
+        n_err = sum(1 for i in range(1, num_subjects + 1)
+                    for u in units if u[0] not in load_subject(i)[1])
+        if n_err:
+            print(f"\n⚠️ 완료되지 않은 작업 단위 {n_err}개가 있습니다. 같은 명령을 다시 실행하면 그 부분만 다시 호출합니다.")
 
     print("\n✨ 모든 실험이 성공적으로 종료되었습니다!")
 
@@ -347,8 +455,8 @@ if __name__ == "__main__":
     parser.add_argument("--version", type=str, default="", help="Condition 폴더명 뒤에 붙일 버전 (예: 2 -> vanilla2)")
 
     # 비용 제어
-    parser.add_argument("--scenarios", type=str, default="all", choices=["all", "check"],
-                        help="check: Check-GoBack/Check-Stay/Check-Partial만 (irrational 경로 제외)")
+    parser.add_argument("--scenarios", type=str, default="all", choices=list(SCENARIO_SUBSETS),
+                        help="all: 78개 / rational: irrational 제외 73개 / check: Check 계열 55개 / goback: Check-GoBack 22개")
     parser.add_argument("--scenario_ids", type=str, default=None,
                         help="쉼표로 구분한 scenario_id 목록 (예: 1,6,40). 지정 시 --scenarios보다 우선")
 
@@ -358,17 +466,22 @@ if __name__ == "__main__":
     parser.add_argument("--belief_order", type=str, default="random", choices=["random", "initial_first", "now_first"],
                         help="--current_belief일 때 두 belief 질문의 제시 순서. random(기본): 호출마다 무작위(시드 고정), CSV의 belief_order 컬럼에 기록")
     parser.add_argument("--order_seed", type=int, default=0, help="belief_order=random의 시드")
-    parser.add_argument("--legacy_wording", action="store_true",
-                        help="everystep / prefixstep belief 문구를 수정 이전 것으로 사용 (기존 Every-step 결과 재현; 결과 폴더 'everystep')")
+    parser.add_argument("--new_wording", action="store_true",
+                        help="everystep / prefixstep에 'only given the information up to step t' 실험용 문구 사용 (결과 폴더 *_upto). 기본은 논문과 같은 문구")
     parser.add_argument("--mask_hidden", action="store_true",
                         help="Map Configuration에서 Spot 2의 트럭 정체를 숨김 (Spot 2가 보일 때만 로그로 드러남)")
 
     parser.add_argument("--preview", action="store_true", help="API 호출 없이 생성될 프롬프트만 출력")
+    parser.add_argument("--batch", action="store_true",
+                        help="Claude Message Batches API로 실행 (50%% 할인, 요청마다 독립 처리). 중단 후 같은 명령으로 재개")
+    parser.add_argument("--batch_poll", type=int, default=60, help="Batch 상태 확인 간격(초)")
 
     args = parser.parse_args()
 
     if args.current_belief and args.mode not in STEPWISE_MODES:
         parser.error("--current_belief는 --mode everystep 또는 prefixstep에서만 사용할 수 있습니다.")
+    if args.new_wording and args.mode not in STEPWISE_MODES:
+        parser.error("--new_wording은 everystep / prefixstep에서만 사용할 수 있습니다 (End-step 문구는 바꾸지 않음).")
     if args.mask_hidden and args.mode not in STEPWISE_MODES + ("normal",):
         parser.error("--mask_hidden은 normal / everystep / prefixstep에서만 사용할 수 있습니다.")
     if args.mask_hidden and args.mode == "normal":
@@ -382,6 +495,8 @@ if __name__ == "__main__":
             parser.error("--effort none과 --thinking on은 함께 쓸 수 없습니다.")
         print("💡 Claude에는 'none' effort가 없어 --thinking off로 처리합니다.")
         args.thinking, args.effort = "off", None
+    if args.batch and not is_claude:
+        parser.error("--batch는 현재 Claude 모델에서만 지원됩니다.")
     if args.thinking != "default" and not is_claude:
         parser.error("--thinking은 현재 Claude 모델에만 적용됩니다. 다른 모델은 --effort로 추론량을 조절하세요.")
     thinking_used = args.thinking == "on" or (args.thinking == "default" and "claude-opus" in args.model)
@@ -393,5 +508,6 @@ if __name__ == "__main__":
     run_experiment(args.model, args.condition, args.mode, args.subjects, args.effort, args.version,
                    scenarios=args.scenarios, scenario_ids=ids, current_belief=args.current_belief,
                    belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
-                   legacy_wording=args.legacy_wording, order_seed=args.order_seed,
-                   thinking=args.thinking, temperature=args.temperature)
+                   legacy_wording=not args.new_wording, order_seed=args.order_seed,
+                   thinking=args.thinking, temperature=args.temperature,
+                   batch=args.batch, batch_poll=args.batch_poll)

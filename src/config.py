@@ -30,25 +30,22 @@ STEPWISE_MODES = ("everystep", "prefixstep")
 SUBFOLDER_MODES = ("everystep", "prefixstep", "reverse", "control")
 
 
-def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=False):
+def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True):
     """
-    실험 변형까지 반영한 하위 폴더 이름을 반환함.
-      everystep + legacy_wording     -> 'everystep'        (논문에 쓴 기존 Every-step 결과 폴더)
-      everystep (새 문구, 기본값)    -> 'everystep_upto'   (기존 결과와 섞이지 않도록 분리)
-      everystep + current_belief     -> 'everystep_upto_cur'
-      prefixstep (기본값)            -> 'prefixstep'
-      prefixstep + legacy_wording    -> 'prefixstep_legacy'
-      prefixstep + mask_hidden + cur -> 'prefixstep_mask_cur'
-      normal                         -> ''  (condition 폴더 바로 아래, 문구 변경 없음)
+    실험 변형까지 반영한 하위 폴더 이름을 반환함. 논문과 같은 문구(legacy)가 기본.
+      everystep                      -> 'everystep'        (논문 Every-step 결과 폴더)
+      prefixstep                     -> 'prefixstep'       (End-step 질문을 잘린 로그에 사용)
+      everystep / prefixstep + 새 문구(--new_wording) -> 'everystep_upto' / 'prefixstep_upto'
+      + current_belief               -> '..._cur'
+      + mask_hidden                  -> '..._mask'
+      normal                         -> ''  (condition 폴더 바로 아래)
     """
     if mode not in SUBFOLDER_MODES:
         return ""
     name = mode
-    # belief 문구 버전 ('only given the information up to step t')
-    if mode == "everystep" and not legacy_wording:
+    # 실험용 새 문구('only given the information up to step t')만 별도 폴더로
+    if mode in STEPWISE_MODES and not legacy_wording:
         name += "_upto"
-    elif mode == "prefixstep" and legacy_wording:
-        name += "_legacy"
     if mask_hidden:
         name += "_mask"
     if current_belief:
@@ -74,15 +71,28 @@ def result_dir(model_name, condition, mode_dir=""):
 CHECK_GROUP_IDS = (1, 2, 4, 6, 7)
 
 
+# Check-GoBack (G2 Present / Absent)
+GOBACK_GROUP_IDS = (1, 4)
+
+SCENARIO_SUBSETS = ("all", "rational", "check", "goback")
+
+
 def get_scenario_subset(subset="all", include_irrational=False):
     """
-    API를 돌릴 scenario_id 집합을 반환함.
-      'all'  : 78개 전체 (기존 동작, irrational 포함)
-      'check': Check-GoBack / Check-Stay / Check-Partial만. 분석에서 어차피 제외되는
-               irrational 경로(11, 12, 22, 71, 72)는 기본적으로 빼서 비용을 줄임.
+    API를 돌릴 scenario_id 집합을 반환함. 'all' 외에는 irrational 경로(11, 12, 22, 71, 72)를 뺌
+    (논문 분석에서 제외되는 시나리오라 호출 비용만 듦).
+      'all'      : 78개 전체 (기존 동작)
+      'rational' : irrational을 뺀 73개 (논문 분석 범위)
+      'check'    : Check-GoBack / Check-Stay / Check-Partial (55개)
+      'goback'   : Check-GoBack Present / Absent (22개)
     """
     if subset == "all":
         return None  # 필터 없음
+    if subset == "rational":
+        return sorted(s for g in get_group_indices(include_irrational=include_irrational) for s in g)
+    if subset == "goback":
+        groups = get_group_indices(include_irrational=include_irrational)
+        return sorted(sid for gid in GOBACK_GROUP_IDS for sid in groups[gid - 1])
     if subset == "check":
         groups = get_group_indices(include_irrational=include_irrational)
         return sorted(sid for gid in CHECK_GROUP_IDS for sid in groups[gid - 1])

@@ -175,42 +175,47 @@ Time Step 8: Agent at (1, 1) | Spot 1 is Visible (Observed: Truck K) | Spot 2 is
 
 def _belief_texts(mode, options_str, t_last, legacy_wording):
     """
-    belief 질문 문구와 JSON 필드 앞부분(time_step)을 반환.
-      Returns: initial_text, now_text, initial_ts, now_ts
-        initial_ts / now_ts: JSON 블록 안에 넣을 "time_step" 값 (None이면 넣지 않음)
+    belief 질문 문구와 JSON 블록 안의 "time_step" 값을 반환.
+      Returns: initial_text, now_text, initial_ts, now_ts  (ts가 None이면 JSON에 넣지 않음)
 
-    - normal(End-step): 사람 실험과 비교되는 조건이라 문구를 절대 바꾸지 않음.
-    - prefixstep / everystep: 정보의 끝 범위를 'up to step t'로 명시해 두 조건의 문구를 통일.
-      initial과 now 질문도 같은 문장 구조를 쓰고, 묻는 시점(t=1 vs t)만 다르게 함.
-    - legacy_wording=True: 이번 수정 이전의 문구 (기존 Every-step 결과 재현용).
+    [initial] 학생이 t=1에 가졌던 믿음. 대상 구절 "being in the occluded spot at t=1"이
+              곧 initial belief를 가리키므로 current 질문에는 쓰지 않음.
+    [now]     학생이 질문 시점(LAST 또는 각 스텝)에 가진 믿음. 대상은 "being in Spot 2".
+              (--current_belief일 때만 사용되는 부차적 질문)
+
+    legacy_wording=True (기본): 논문 실험과 같은 문구
+      - normal / prefixstep : End-step 질문 그대로 ("At the FIRST time step, ... at t=1.")
+                              prefixstep은 로그가 1..t로 잘려 있으므로 질문을 바꾸지 않아도 됨
+      - everystep           : 논문 Every-step 질문 그대로 ("At EVERY time step, ... only given the current information.")
+    legacy_wording=False (--new_wording): 정보 범위를 'up to step t'로 명시한 실험용 문구
     """
-    if mode == 'normal' or (mode == 'prefixstep' and legacy_wording):
-        initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
-                   f"being in the occluded spot at t=1.")
-        now = (f"At the LAST time step, rate the student's current belief: the likelihood the student assigns, "
-               f"at that moment, to {options_str} being in Spot 2, given only what the student has seen so far.")
-        return initial, now, 1, None
+    if legacy_wording:
+        if mode in ('normal', 'prefixstep'):
+            initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
+                       f"being in the occluded spot at t=1.")
+            now = (f"At the LAST time step, rate the student's likelihood for {options_str} "
+                   f"being in Spot 2.")
+            return initial, now, 1, t_last
+        # everystep: 한 응답 안에서 스텝마다 답하므로 "LAST"가 아니라 "EVERY"
+        initial = (f"At EVERY time step, rate the student's likelihood for {options_str} "
+                   f"being in the occluded spot at t=1 only given the current information.")
+        now = (f"At EVERY time step, rate the student's likelihood for {options_str} "
+               f"being in Spot 2 only given the current information.")
+        return initial, now, None, None
 
+    if mode == 'normal':
+        raise ValueError("End-step(normal)은 사람 실험과 비교되는 조건이라 문구를 바꾸지 않습니다 (legacy_wording=True).")
     if mode == 'prefixstep':
         initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
                    f"being in the occluded spot at t=1, only given the information up to step {t_last}.")
         now = (f"At the LAST time step, rate the student's likelihood for {options_str} "
                f"being in Spot 2 at t={t_last}, only given the information up to step {t_last}.")
         return initial, now, 1, t_last
-
-    # everystep: 한 번의 응답 안에서 t가 바뀌므로 각 entry의 time_step을 t로 지칭
-    if legacy_wording:
-        initial = (f"At EVERY time step, rate the student's likelihood for {options_str} "
-                   f"being in the occluded spot at t=1 only given the current information.")
-        now = (f"At EVERY time step, rate the student's current belief: the likelihood the student assigns, "
-               f"at that time step, to {options_str} being in Spot 2, given only what the student has seen up to that step.")
-        return initial, now, None, None
     initial = (f"At EVERY time step t, rate the student's likelihood for {options_str} "
                f"being in the occluded spot at t=1, only given the information up to step t.")
     now = (f"At EVERY time step t, rate the student's likelihood for {options_str} "
            f"being in Spot 2 at t, only given the information up to step t.")
-    # JSON 예시는 time_step 1 entry이므로 now 블록의 time_step도 1로 표기
-    # (current_belief일 때만 블록 안에 time_step을 넣음; 아래 _build_belief_block 참고)
+    # JSON 예시는 time_step 1 entry이므로 블록 안의 time_step도 1로 표기
     return initial, now, 1, 1
 
 
@@ -250,7 +255,7 @@ def _build_belief_block(initial_text, now_text, json_fields, current_belief, bel
 
 def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
                              current_belief=False, belief_order='initial_first',
-                             mask_hidden=False, legacy_wording=False, control_probes=None):
+                             mask_hidden=False, legacy_wording=True, control_probes=None):
     """
     Args:
         df_scenario: 시나리오 데이터프레임.
@@ -264,8 +269,8 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
             main_experiment.py의 기본값 'random'은 호출마다 이 둘 중 하나로 정해져서 넘어옴.
         mask_hidden: True면 Map Configuration에서 Spot 2의 트럭 정체를 숨기고,
             로그에서 Spot 2가 보일 때만 관찰 내용을 알려줌.
-        legacy_wording: True면 everystep / prefixstep의 belief 문구를 이번 수정 이전 것으로 사용
-            (기존 Every-step 결과와 동일한 프롬프트 재현용). normal(End-step)은 항상 원래 문구.
+        legacy_wording: True(기본)면 논문과 같은 문구. prefixstep은 End-step 질문을 잘린 로그에 그대로 사용.
+            False면 'only given the information up to step t' 실험용 문구 (everystep / prefixstep만).
         control_probes: mode='control'에서 문항 시점 dict (control_items.sample_probes 결과).
     Returns:
         system_prompt, user_prompt
@@ -446,7 +451,7 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
         [Chronological Log]
         {dynamic_logs}
 
-        {control_task_text(probes, max_steps)}"""
+        {control_task_text(probes, max_steps, options_str)}"""
         return system_prompt, task_instruction
     
     # [1] Mode: Everystep (신규 방식 - 모든 스텝 분석)

@@ -40,8 +40,8 @@ def run_analysis(model_name, condition, mode, baseline="human", analysis_type="a
     
     if not os.path.exists(target_pkl):
         print(f"❌ Error: Target data not found at {target_pkl}. 변환을 먼저 수행하세요.")
-        if mode.startswith("everystep_upto"):
-            print("   💡 기존 문구로 돌린 Every-step 결과(논문 데이터)는 'everystep' 폴더에 있습니다. --legacy_wording을 붙여보세요.")
+        if "_upto" in mode:
+            print("   💡 논문과 같은 문구의 결과는 '_upto'가 없는 폴더에 있습니다. --new_wording을 빼보세요.")
         return
     if not os.path.exists(baseline_pkl):
         print(f"❌ Error: Baseline data not found at {baseline_pkl}. 변환을 먼저 수행하세요.")
@@ -133,7 +133,7 @@ if __name__ == "__main__":
                         help="Experiment option")
     parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과(*_cur) 분석")
     parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과(*_mask) 분석")
-    parser.add_argument("--legacy_wording", action="store_true", help="기존 belief 문구 결과 분석 (everystep -> 'everystep')")
+    parser.add_argument("--new_wording", action="store_true", help="'up to step t' 새 문구 결과(*_upto) 분석")
     parser.add_argument("--type", type=str, default="all",
                         choices=["all", "bar", "scatter", "rmse", "rsa", "phase"],
                         help="Specific analysis to run (default: all)")
@@ -143,5 +143,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # 변형 플래그를 반영한 결과 하위 폴더 이름 (예: prefixstep + --current_belief -> prefixstep_cur)
-    mode_dir = mode_folder(args.mode, args.current_belief, args.mask_hidden, args.legacy_wording) or "normal"
+    mode_dir = mode_folder(args.mode, args.current_belief, args.mask_hidden, not args.new_wording) or "normal"
     run_analysis(args.model, args.condition, mode_dir, args.baseline, args.type, args.vpa)
