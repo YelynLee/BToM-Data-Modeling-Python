@@ -1,20 +1,31 @@
 """
-Control 실험(공간/궤적 이해 점검) 문항 정의.
+Control 실험(공간/궤적·질문 이해 점검) 문항 정의.
 
 LLM이 ToM 실험에서 받았던 것과 동일한 Map Configuration + 전체 궤적 로그를 주고,
-로그와 좌표를 제대로 이해했는지 사실 질문으로 점검함.
+로그와 좌표, 그리고 ToM 질문 문구 자체를 제대로 이해했는지 사실 질문으로 점검함.
 
 이 모듈 하나에 다음을 모아 프롬프트와 채점이 같은 정의를 공유하게 함:
-  - sample_probes  : 문항에 쓰일 시점(t)을 (seed, subject, scenario)로 고정된 난수로 추출
+  - sample_probes     : 문항에 쓰일 시점(t)과 보기 순서를 (seed, subject, scenario)로 고정된 난수로 추출
   - control_task_text : 프롬프트에 들어갈 질문 + JSON 템플릿
-  - ground_truth   : 정답 계산
-  - score_response : 응답 채점
+  - ground_truth      : 정답 계산
+  - score_response    : 응답 채점
+  - upgrade_legacy_row: 이전 문항 번호 체계(v1: 9문항, v2: 13문항)로 저장된 결과를 현재 번호로 변환
+
+[문항 구성 (v3)]  비슷한 문항끼리 묶어 순서대로 배치
+  1  FIRST 시점 좌표            2  LAST 시점 좌표
+  3  t=1에 가려진 spot           4  LAST 시점 위치 (Spot 1 / Spot 2 / Neither)  ※ 2와 같은 내용을 범주로 다시 물음
+  5  특정 두 시점의 Spot 2 가시 여부 (안 보이는 시점 1개 + 보이는 시점 1개, 순서 무작위)
+  6  Spot 2를 처음 본 스텝
+  7  시작점 -> Spot 1 최단 이동   8  시작점 -> Spot 2 최단 이동
+  9  전체 이동 횟수              10 제자리 스텝 수
+  11 특정 시점의 거리 변화 (Spot 1, Spot 2)
+  12 질문 해석 객관식: (a) End-step / Prefix-step 문구, (b) Every-step 문구
 
 [격자 경계에 관한 주의]
 원래 ToM 프롬프트의 Map Configuration에는 격자 크기(15x5)가 명시되어 있지 않음.
 건물이 격자 가장자리에 닿는 배치(x=1~14, x=2~15)에서는, 프롬프트만 보면
 격자 밖으로 돌아가는 더 짧은 경로가 가능해 보임. 설정을 그대로 전달하는 원칙에 따라
-프롬프트에 격자 크기를 추가하지 않고, 최단거리 정답을 두 가지로 계산함:
+프롬프트에 격자 크기를 추가하지 않고, 최단거리 정답(q7, q8)을 두 가지로 계산함:
   - bounded   : 실제 실험 격자(1~15, 1~5) 안에서의 최단거리 (= 실험의 실제 세계)
   - unbounded : 격자 경계 없이 건물만 피하는 최단거리 (= 프롬프트만으로 추론 가능한 값)
 """
@@ -30,19 +41,19 @@ CHANGE_OPTIONS = ("closer", "farther", "same")
 LOCATION_OPTIONS = ("Spot 1", "Spot 2", "Neither")
 
 # -------------------------------------------------------------------------
-# 질문 해석 문항 (q13): ToM 실험의 실제 질문 문구를 보여주고 무엇을 묻는지 고르게 함.
+# 질문 해석 문항 (q12): ToM 실험의 실제 질문 문구를 보여주고 무엇을 묻는지 고르게 함.
 # 보기는 표준 id(a~d)로 정의하고, 화면에 보이는 순서(A~D)는 probe마다 섞음. 정답은 항상 'a'.
-#   q13a: End-step / Prefix-step 문구
-#   q13b: Every-step 문구 (특정 Time Step t에 대해 답한다고 가정)
+#   q12a: End-step / Prefix-step 문구
+#   q12b: Every-step 문구 (특정 Time Step t에 대해 답한다고 가정)
 #         b = current belief 해석, c = hindsight 해석 (미래 로그까지 사용)
 # -------------------------------------------------------------------------
-Q13A_OPTIONS = {
+Q12A_OPTIONS = {
     "a": "What the student believed at Time Step 1 about which truck (if any) was in the occluded spot",
     "b": "What the student believes at the last time step about which truck (if any) is in Spot 2",
     "c": "Which truck (if any) is actually in Spot 2",
     "d": "How much the student likes each truck",
 }
-Q13B_OPTIONS = {
+Q12B_OPTIONS = {
     "a": "What the student believed at Time Step 1, judged only from the log up to Time Step {t}",
     "b": "What the student believes at Time Step {t}, judged only from the log up to Time Step {t}",
     "c": "What the student believed at Time Step 1, judged from the whole log including later time steps",
@@ -112,21 +123,26 @@ def belief_options_str(df_scenario):
 
 
 # =========================================================================
-# Probe 시점 추출
+# Probe 시점 / 보기 순서 추출
 # =========================================================================
+PROBE_COLS = ['probe_t5a', 'probe_t5b', 'probe_t11', 'probe_t12', 'probe_q12a_order', 'probe_q12b_order']
+
+
 def sample_probes(df_scenario, subject_idx=1, seed=0):
     """
-    문항에 쓰일 시점을 뽑음. (seed, subject, scenario)로 시드가 고정되어 재실행/재개해도 동일함.
-      t1  : 좌표를 묻는 시점 (전체 중 무작위)
-      t2a, t2b : Spot 2 가시 여부를 묻는 두 시점. 가능하면 '안 보임' 1개 + '보임' 1개를 뽑고
-                 제시 순서는 무작위. 한쪽이 없으면 같은 쪽에서 서로 다른 두 시점.
-      t9  : 직전 스텝 대비 거리 변화를 묻는 시점 (2번째 스텝 이후)
+    문항에 쓰일 시점과 보기 순서를 뽑음. (seed, subject, scenario)로 시드가 고정되어 재실행/재개해도 동일함.
+      t5a, t5b : Spot 2 가시 여부를 묻는 두 시점. 가능하면 '안 보임' 1개 + '보임' 1개, 제시 순서는 무작위.
+                 한쪽이 없으면(18개 시나리오는 끝까지 못 봄) 같은 쪽에서 서로 다른 두 시점.
+      t11      : 직전 스텝 대비 거리 변화를 묻는 시점 (2번째 스텝 이후)
+      t12      : Every-step 문구 해석 문항의 기준 시점. 해석이 실제로 갈리는 시점(G2를 본 이후,
+                 마지막 스텝 이전)을 우선 사용
+    ※ 이전 버전과 같은 시점이 나오도록 난수 추출 순서를 유지함 (첫 추출은 이전 q1용 시점으로, 현재는 쓰지 않음)
     """
     _, _, _, steps, _, vis2 = _scenario_info(df_scenario)
     sc_id = int(df_scenario['scenario_id'].iloc[0])
     rng = random.Random(f"control-{seed}-{subject_idx}-{sc_id}")
 
-    t1 = rng.choice(steps)
+    rng.choice(steps)  # (이전 버전 q1 시점; 추출 순서 유지용)
 
     hidden = [t for t in steps if vis2[t] == 0]
     visible = [t for t in steps if vis2[t] == 1]
@@ -137,16 +153,14 @@ def sample_probes(df_scenario, subject_idx=1, seed=0):
         pair = rng.sample(pool, 2) if len(pool) >= 2 else [pool[0], pool[0]]
     rng.shuffle(pair)
 
-    t9 = rng.choice(steps[1:])
+    t11 = rng.choice(steps[1:])
 
-    # q13b: 해석이 실제로 갈리는 시점(G2를 본 이후, 마지막 스텝 이전)을 우선 사용
     after_seen = [t for t in steps if visible and t >= visible[0] and t < steps[-1]]
-    t13 = rng.choice(after_seen) if after_seen else rng.choice(steps[1:])
+    t12 = rng.choice(after_seen) if after_seen else rng.choice(steps[1:])
     order_a = "".join(rng.sample("abcd", 4))
     order_b = "".join(rng.sample("abcd", 4))
-    return {'probe_t1': t1, 'probe_t2a': pair[0], 'probe_t2b': pair[1], 'probe_t9': t9,
-            'probe_t13': t13, 'probe_q13a_order': order_a, 'probe_q13b_order': order_b,
-            'probe_seed': seed}
+    return {'probe_t5a': pair[0], 'probe_t5b': pair[1], 'probe_t11': t11, 'probe_t12': t12,
+            'probe_q12a_order': order_a, 'probe_q12b_order': order_b, 'probe_seed': seed}
 
 
 def _mc_lines(options, order, **fmt):
@@ -157,59 +171,56 @@ def _mc_lines(options, order, **fmt):
 # 프롬프트 문항
 # =========================================================================
 def control_task_text(probes, max_steps, options_str="L, M, and Empty"):
-    t1, t2a, t2b, t9 = probes['probe_t1'], probes['probe_t2a'], probes['probe_t2b'], probes['probe_t9']
-    t13 = probes['probe_t13']
-    q13a = (f'At the FIRST time step, rate the student\'s likelihood for {options_str} '
+    t5a, t5b, t11, t12 = probes['probe_t5a'], probes['probe_t5b'], probes['probe_t11'], probes['probe_t12']
+    q12a = (f'At the FIRST time step, rate the student\'s likelihood for {options_str} '
             f'being in the occluded spot at t=1.')
-    q13b = (f'At EVERY time step, rate the student\'s likelihood for {options_str} '
+    q12b = (f'At EVERY time step, rate the student\'s likelihood for {options_str} '
             f'being in the occluded spot at t=1 only given the current information.')
     return f"""This log has {max_steps} time steps. Answer the following questions about the map and the log.
-        These are questions about the movement log itself, not about the student's preferences or thoughts.
+        These are questions about the movement log itself.
 
-        [Movement rules for questions 5-9]
+        [Movement rules]
         - In one time step, the student either stays in place or moves to an adjacent cell (up, down, left, or right; no diagonal moves).
         - The student cannot enter cells occupied by the building.
         - A "move" is a time step at which the student's position differs from the previous time step.
         - The "distance" to a spot is the smallest number of moves needed to reach it without entering the building.
 
-        1. What were the student's coordinates at Time Step {t1}?
-        2. (a) At Time Step {t2a}, was Spot 2 visible to the student? Answer "yes" or "no".
-           (b) At Time Step {t2b}, was Spot 2 visible to the student? Answer "yes" or "no".
-        3. At which time step did the student FIRST see Spot 2? If Spot 2 was never visible, answer 0.
+        1. At the FIRST time step, where was the student? Give the coordinates.
+        2. At the LAST time step, where was the student? Give the coordinates.
+        3. Which parking spot was the occluded spot at t=1? Answer exactly one of: "Spot 1", "Spot 2", "Both", or "Neither".
         4. At the LAST time step, where was the student? Answer exactly one of: "Spot 1", "Spot 2", or "Neither".
-        5. From the student's starting position (Time Step 1), what is the smallest number of moves needed to reach Spot 1?
-        6. From the student's starting position (Time Step 1), what is the smallest number of moves needed to reach Spot 2?
-        7. Over the whole log, how many moves did the student make?
-        8. Over the whole log, at how many time steps did the student stay at the same position as in the previous time step?
-        9. Compared with Time Step {t9 - 1}, at Time Step {t9} did the student's distance to Spot 1 become "closer", "farther", or stay the "same"? Answer the same for Spot 2.
-        10. Which parking spot was the occluded spot at t=1? Answer exactly one of: "Spot 1", "Spot 2", "Both", or "Neither".
-        11. At the FIRST time step, where was the student? Give the coordinates.
-        12. At the LAST time step, where was the student? Give the coordinates.
-        13. (a) Consider this question about the log above: "{q13a}"
+        5. (a) At time step {t5a}, was Spot 2 visible to the student? Answer "yes" or "no".
+           (b) At time step {t5b}, was Spot 2 visible to the student? Answer "yes" or "no".
+        6. At which time step did the student FIRST see Spot 2? If Spot 2 was never visible, answer 0.
+        7. From the student's starting position (Time Step 1), what is the smallest number of moves needed to reach Spot 1?
+        8. From the student's starting position (Time Step 1), what is the smallest number of moves needed to reach Spot 2?
+        9. Over the whole log, how many moves did the student make?
+        10. Over the whole log, at how many time steps did the student stay at the same position as in the previous time step?
+        11. Compared with Time Step {t11 - 1}, at Time Step {t11} did the student's distance to Spot 1 become "closer", "farther", or stay the "same"? Answer the same for Spot 2.
+        12. (a) Consider this question about the log above: "{q12a}"
                What does this question ask you to rate? Choose one letter.
-{_mc_lines(Q13A_OPTIONS, probes['probe_q13a_order'])}
-            (b) Now consider this question, answered for Time Step {t13}: "{q13b}"
-               For Time Step {t13}, what does this question ask you to rate? Choose one letter.
-{_mc_lines(Q13B_OPTIONS, probes['probe_q13b_order'], t=t13)}
+{_mc_lines(Q12A_OPTIONS, probes['probe_q12a_order'])}
+            (b) Now consider this question, answered for Time Step {t12}: "{q12b}"
+               For Time Step {t12}, what does this question ask you to rate? Choose one letter.
+{_mc_lines(Q12B_OPTIONS, probes['probe_q12b_order'], t=t12)}
 
         Return the result in the following JSON structure:
         {{
-            "q1_position": {{ "x": int, "y": int }},
-            "q2a_spot2_visible": "yes" or "no",
-            "q2b_spot2_visible": "yes" or "no",
-            "q3_first_observed_step": int,
+            "q1_first_position": {{ "x": int, "y": int }},
+            "q2_last_position": {{ "x": int, "y": int }},
+            "q3_occluded_spot": "Spot 1" or "Spot 2" or "Both" or "Neither",
             "q4_final_location": "Spot 1" or "Spot 2" or "Neither",
-            "q5_shortest_moves_spot1": int,
-            "q6_shortest_moves_spot2": int,
-            "q7_total_moves": int,
-            "q8_stay_steps": int,
-            "q9_spot1_change": "closer" or "farther" or "same",
-            "q9_spot2_change": "closer" or "farther" or "same",
-            "q10_occluded_spot": "Spot 1" or "Spot 2" or "Both" or "Neither",
-            "q11_first_position": {{ "x": int, "y": int }},
-            "q12_last_position": {{ "x": int, "y": int }},
-            "q13a_question_meaning": "A" or "B" or "C" or "D",
-            "q13b_question_meaning": "A" or "B" or "C" or "D"
+            "q5a_spot2_visible": "yes" or "no",
+            "q5b_spot2_visible": "yes" or "no",
+            "q6_first_observed_step": int,
+            "q7_shortest_moves_spot1": int,
+            "q8_shortest_moves_spot2": int,
+            "q9_total_moves": int,
+            "q10_stay_steps": int,
+            "q11_spot1_change": "closer" or "farther" or "same",
+            "q11_spot2_change": "closer" or "farther" or "same",
+            "q12a_question_meaning": "A" or "B" or "C" or "D",
+            "q12b_question_meaning": "A" or "B" or "C" or "D"
         }}
         """
 
@@ -218,64 +229,106 @@ def control_task_text(probes, max_steps, options_str="L, M, and Empty"):
 # 정답
 # =========================================================================
 def ground_truth(df_scenario, probes):
-    """probe 시점에 대한 정답 dict. 최단거리 문항(q5, q6)은 bounded / unbounded 두 정답을 모두 둠."""
+    """probe 시점에 대한 정답 dict. 최단거리 문항(q7, q8)은 bounded / unbounded 두 정답을 모두 둠.
+    probes에 없는 항목(이전 버전 결과)의 정답은 None."""
     _, wall, spots, steps, pos, vis2 = _scenario_info(df_scenario)
-    probes_raw = probes
-    probes = {k: int(v) for k, v in probes.items() if k.startswith('probe_t') and v == v}
+    t = {k: int(v) for k, v in probes.items()
+         if k.startswith('probe_t') and v is not None and v == v}
     start, last = pos[steps[0]], pos[steps[-1]]
 
-    seen = [t for t in steps if vis2[t] == 1]
+    seen = [s for s in steps if vis2[s] == 1]
     final = "Spot 1" if last == spots[1] else "Spot 2" if last == spots[2] else "Neither"
     moves = sum(pos[a] != pos[b] for a, b in zip(steps[:-1], steps[1:]))
 
-    def change(spot):
-        t = probes['probe_t9']
-        before = shortest_moves(pos[t - 1], spots[spot], wall)
-        after = shortest_moves(pos[t], spots[spot], wall)
-        return "closer" if after < before else "farther" if after > before else "same"
-
-    vis1 = {int(t): int(v) for t, v in zip(df_scenario['time_step'], df_scenario['visible_goal1'])}
+    vis1 = {int(a): int(v) for a, v in zip(df_scenario['time_step'], df_scenario['visible_goal1'])}
     hidden_t1 = [n for n, v in ((1, vis1[steps[0]]), (2, vis2[steps[0]])) if v == 0]
     occluded = "Both" if len(hidden_t1) == 2 else f"Spot {hidden_t1[0]}" if hidden_t1 else "Neither"
 
-    def letter(order):
-        return LETTERS[order.index("a")]  # 표준 정답 'a'가 화면에서 몇 번째 글자인지
+    def change(spot):
+        if 'probe_t11' not in t:
+            return None
+        s_ = t['probe_t11']
+        before = shortest_moves(pos[s_ - 1], spots[spot], wall)
+        after = shortest_moves(pos[s_], spots[spot], wall)
+        return "closer" if after < before else "farther" if after > before else "same"
 
-    gt = {
-        'q1_position': {'x': pos[probes['probe_t1']][0], 'y': pos[probes['probe_t1']][1]},
-        'q2a_spot2_visible': "yes" if vis2[probes['probe_t2a']] else "no",
-        'q2b_spot2_visible': "yes" if vis2[probes['probe_t2b']] else "no",
-        'q3_first_observed_step': seen[0] if seen else 0,
+    def letter(order_key):
+        order = probes.get(order_key)
+        return LETTERS[order.index("a")] if isinstance(order, str) else None  # 정답 'a'의 화면상 글자
+
+    return {
+        'q1_first_position': {'x': start[0], 'y': start[1]},
+        'q2_last_position': {'x': last[0], 'y': last[1]},
+        'q3_occluded_spot': occluded,
         'q4_final_location': final,
-        'q5_shortest_moves_spot1': shortest_moves(start, spots[1], wall, bounded=True),
-        'q6_shortest_moves_spot2': shortest_moves(start, spots[2], wall, bounded=True),
-        'q7_total_moves': moves,
-        'q8_stay_steps': (len(steps) - 1) - moves,
-        'q9_spot1_change': change(1),
-        'q9_spot2_change': change(2),
-        'q10_occluded_spot': occluded,
-        'q11_first_position': {'x': start[0], 'y': start[1]},
-        'q12_last_position': {'x': last[0], 'y': last[1]},
-        'q13a_question_meaning': letter(order_a) if (order_a := probes_raw.get('probe_q13a_order')) else None,
-        'q13b_question_meaning': letter(order_b) if (order_b := probes_raw.get('probe_q13b_order')) else None,
+        'q5a_spot2_visible': ("yes" if vis2[t['probe_t5a']] else "no") if 'probe_t5a' in t else None,
+        'q5b_spot2_visible': ("yes" if vis2[t['probe_t5b']] else "no") if 'probe_t5b' in t else None,
+        'q6_first_observed_step': seen[0] if seen else 0,
+        'q7_shortest_moves_spot1': shortest_moves(start, spots[1], wall, bounded=True),
+        'q8_shortest_moves_spot2': shortest_moves(start, spots[2], wall, bounded=True),
+        'q9_total_moves': moves,
+        'q10_stay_steps': (len(steps) - 1) - moves,
+        'q11_spot1_change': change(1),
+        'q11_spot2_change': change(2),
+        'q12a_question_meaning': letter('probe_q12a_order'),
+        'q12b_question_meaning': letter('probe_q12b_order'),
         # 격자 경계를 모르는 경우의 정답 (설명은 모듈 docstring 참고)
-        'q5_shortest_moves_spot1_unbounded': shortest_moves(start, spots[1], wall, bounded=False),
-        'q6_shortest_moves_spot2_unbounded': shortest_moves(start, spots[2], wall, bounded=False),
+        'q7_shortest_moves_spot1_unbounded': shortest_moves(start, spots[1], wall, bounded=False),
+        'q8_shortest_moves_spot2_unbounded': shortest_moves(start, spots[2], wall, bounded=False),
     }
-    return gt
+
+
+# =========================================================================
+# 이전 버전 결과 변환
+# =========================================================================
+# v1(9문항) / v2(13문항) 키 -> 현재(v3) 키. v1·v2의 q1(무작위 시점 좌표)은 현재 문항에 없어서 제외.
+LEGACY_KEY_MAP = {
+    'q2a_spot2_visible': 'q5a_spot2_visible', 'q2b_spot2_visible': 'q5b_spot2_visible',
+    'q3_first_observed_step': 'q6_first_observed_step',
+    'q5_shortest_moves_spot1': 'q7_shortest_moves_spot1', 'q6_shortest_moves_spot2': 'q8_shortest_moves_spot2',
+    'q7_total_moves': 'q9_total_moves', 'q8_stay_steps': 'q10_stay_steps',
+    'q9_spot1_change': 'q11_spot1_change', 'q9_spot2_change': 'q11_spot2_change',
+    'q10_occluded_spot': 'q3_occluded_spot', 'q11_first_position': 'q1_first_position',
+    'q12_last_position': 'q2_last_position',
+    'q13a_question_meaning': 'q12a_question_meaning', 'q13b_question_meaning': 'q12b_question_meaning',
+    'probe_t2a': 'probe_t5a', 'probe_t2b': 'probe_t5b', 'probe_t9': 'probe_t11', 'probe_t13': 'probe_t12',
+    'probe_q13a_order': 'probe_q12a_order', 'probe_q13b_order': 'probe_q12b_order',
+}
+
+
+def result_version(columns):
+    cols = set(columns)
+    if 'q1_first_position' in cols:
+        return 'v3'
+    if 'q13a_question_meaning' in cols:
+        return 'v2'
+    return 'v1'
+
+
+def upgrade_legacy_row(row):
+    """이전 버전(v1, v2) 결과 행을 현재 키로 변환. 현재 버전 행은 그대로 반환."""
+    if 'q1_first_position' in row or 'q2_last_position' in row:
+        return row
+    out = {k: v for k, v in row.items() if k not in LEGACY_KEY_MAP and k not in ('q1_position', 'probe_t1')}
+    for old, new in LEGACY_KEY_MAP.items():
+        if old in row:
+            out[new] = row[old]
+    return out
 
 
 # =========================================================================
 # 채점
 # =========================================================================
-ITEMS = ['q1_position', 'q2a_spot2_visible', 'q2b_spot2_visible', 'q3_first_observed_step',
-         'q4_final_location', 'q5_shortest_moves_spot1', 'q6_shortest_moves_spot2',
-         'q7_total_moves', 'q8_stay_steps', 'q9_spot1_change', 'q9_spot2_change',
-         'q10_occluded_spot', 'q11_first_position', 'q12_last_position',
-         'q13a_question_meaning', 'q13b_question_meaning']
-POSITION_ITEMS = ['q1_position', 'q11_first_position', 'q12_last_position']
-NUMERIC_ITEMS = ['q3_first_observed_step', 'q5_shortest_moves_spot1', 'q6_shortest_moves_spot2',
-                 'q7_total_moves', 'q8_stay_steps']
+ITEMS = ['q1_first_position', 'q2_last_position', 'q3_occluded_spot', 'q4_final_location',
+         'q5a_spot2_visible', 'q5b_spot2_visible', 'q6_first_observed_step',
+         'q7_shortest_moves_spot1', 'q8_shortest_moves_spot2', 'q9_total_moves', 'q10_stay_steps',
+         'q11_spot1_change', 'q11_spot2_change', 'q12a_question_meaning', 'q12b_question_meaning']
+POSITION_ITEMS = ['q1_first_position', 'q2_last_position']
+LABEL_ITEMS = ['q3_occluded_spot', 'q4_final_location', 'q5a_spot2_visible', 'q5b_spot2_visible',
+               'q11_spot1_change', 'q11_spot2_change']
+NUMERIC_ITEMS = ['q6_first_observed_step', 'q7_shortest_moves_spot1', 'q8_shortest_moves_spot2',
+                 'q9_total_moves', 'q10_stay_steps']
+MEANING_ITEMS = [('q12a_question_meaning', 'probe_q12a_order'), ('q12b_question_meaning', 'probe_q12b_order')]
 
 
 def _as_obj(v):
@@ -309,42 +362,53 @@ def _as_label(v):
 
 def score_response(pred, gt):
     """
+    pred: 응답 행 (probe 보기 순서 포함). gt: ground_truth 결과.
     Returns: dict
-      {item}_correct : bool (q5, q6는 bounded 정답 기준)
-      q5/q6 _correct_unbounded, _correct_either : 격자 경계 해석별 정오
-      {numeric item}_abs_err : |응답 - 정답| (숫자 문항)
+      {item}_correct : bool (q7, q8은 bounded 정답 기준). 정답이 None인 문항은 키를 만들지 않음
+      q7/q8 _correct_unbounded, _correct_either : 격자 경계 해석별 정오
+      {numeric item}_abs_err : |응답 - 정답|
+      q12a/q12b _choice : 고른 해석의 표준 id (a=정답, b=current 해석, c=q12a 실제 트럭 / q12b hindsight 해석, d=기타)
       n_correct, n_items
     """
+    pred = upgrade_legacy_row(dict(pred))
+    # 응답에 열 자체가 없는 문항(이전 버전 결과)은 채점에서 제외. 열은 있는데 값이 비면 오답으로 처리.
+    gt = {k: (v if (k in pred or k.endswith('_unbounded')) else None) for k, v in gt.items()}
     out = {}
     for k in POSITION_ITEMS:
+        if gt.get(k) is None:
+            continue
         p = _as_obj(pred.get(k))
         try:
             out[f'{k}_correct'] = (_as_int(p['x']) == gt[k]['x'] and _as_int(p['y']) == gt[k]['y'])
         except Exception:
             out[f'{k}_correct'] = False
 
-    out['q10_occluded_spot_correct'] = _as_label(pred.get('q10_occluded_spot')) == gt['q10_occluded_spot'].lower()
-    # 질문 해석: 정오 + 어떤 해석(표준 id a~d)을 골랐는지 기록 (b = current, c = hindsight 해석)
-    for k, order_key in (('q13a_question_meaning', 'probe_q13a_order'), ('q13b_question_meaning', 'probe_q13b_order')):
-        ans = _as_label(pred.get(k)).upper()[:1]
-        order = pred.get(order_key)
-        out[f'{k}_correct'] = gt[k] is not None and ans == gt[k]
-        out[f'{k}_choice'] = (order[LETTERS.index(ans)] if isinstance(order, str) and ans in LETTERS else None)
-
-    for k in ('q2a_spot2_visible', 'q2b_spot2_visible', 'q9_spot1_change', 'q9_spot2_change'):
-        out[f'{k}_correct'] = _as_label(pred.get(k)) == gt[k]
-    out['q4_final_location_correct'] = _as_label(pred.get('q4_final_location')) == gt['q4_final_location'].lower()
+    for k in LABEL_ITEMS:
+        if gt.get(k) is not None:
+            out[f'{k}_correct'] = _as_label(pred.get(k)) == gt[k].lower()
 
     for k in NUMERIC_ITEMS:
+        if gt.get(k) is None:
+            continue
         v = _as_int(pred.get(k))
         out[f'{k}_correct'] = v is not None and v == gt[k]
-        out[f'{k}_abs_err'] = abs(v - gt[k]) if v is not None and gt[k] is not None else None
+        out[f'{k}_abs_err'] = abs(v - gt[k]) if v is not None else None
 
-    for k in ('q5_shortest_moves_spot1', 'q6_shortest_moves_spot2'):
+    for k in ('q7_shortest_moves_spot1', 'q8_shortest_moves_spot2'):
+        if gt.get(k) is None:
+            continue
         v = _as_int(pred.get(k))
         out[f'{k}_correct_unbounded'] = v is not None and v == gt[f'{k}_unbounded']
         out[f'{k}_correct_either'] = out[f'{k}_correct'] or out[f'{k}_correct_unbounded']
 
-    flags = [out[f'{k}_correct'] for k in ITEMS if gt.get(k) is not None]
+    for k, order_key in MEANING_ITEMS:
+        if gt.get(k) is None:
+            continue
+        ans = _as_label(pred.get(k)).upper()[:1]
+        order = pred.get(order_key)
+        out[f'{k}_correct'] = ans == gt[k]
+        out[f'{k}_choice'] = order[LETTERS.index(ans)] if isinstance(order, str) and ans in LETTERS else None
+
+    flags = [out[f'{k}_correct'] for k in ITEMS if f'{k}_correct' in out]
     out['n_correct'], out['n_items'] = int(sum(flags)), len(flags)
     return out
