@@ -42,9 +42,9 @@ client_claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 THINKING_SETTINGS = ("default", "on", "off")
 
 
-def _call_claude(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
+def build_claude_params(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
     """
-    Claude 호출 (Opus / Sonnet 공통).
+    Claude Messages API 요청 파라미터와 기록용 메타 정보를 만듦 (일반 호출과 Batch 공통).
 
     thinking:
       - "default": 기존 실험과 동일한 요청 (논문 결과 재현용)
@@ -52,29 +52,23 @@ def _call_claude(model_name, system_prompt, user_prompt, effort=None, thinking="
                    Sonnet -> thinking 없음, temperature TEMPERATURE(0.7), max_tokens 4000
       - "on"     : adaptive thinking. thinking을 켜면 temperature는 1.0이어야 함.
       - "off"    : thinking={"type": "disabled"} 로 명시적으로 끔.
-    effort: output_config.effort 로 전달 ("low" / "medium" / "high" / "max").
-            Claude에는 "none" effort가 없으므로 호출 측(main_experiment)에서 thinking="off"로 바꿔서 넘김.
+    effort: output_config.effort ("low" / "medium" / "high" / "max").
     temperature: None이면 위 기본값. thinking off에서 1.0으로 맞추고 싶을 때 지정.
 
-    Returns: {"thinking": str, "text": str, "meta": dict}
+    Returns: (params dict, meta dict)
+      params의 output_config는 그대로 두며, 일반 호출에서는 SDK 호환을 위해 extra_body로 옮김.
     """
     is_opus = "claude-opus" in model_name
-
-    if thinking == "default":
-        use_thinking = is_opus
-    else:
-        use_thinking = (thinking == "on")
+    use_thinking = is_opus if thinking == "default" else (thinking == "on")
 
     if use_thinking:
-        thinking_cfg = {"type": "adaptive"}
-        temp = 1.0  # thinking 사용 시 temperature는 1.0만 허용
-        max_tokens = 16000
+        thinking_cfg, temp, max_tokens = {"type": "adaptive"}, 1.0, 16000
     else:
         thinking_cfg = {"type": "disabled"} if thinking == "off" else None
         temp = temperature if temperature is not None else TEMPERATURE
         max_tokens = 8000 if thinking == "off" else 4000
 
-    kwargs = {
+    params = {
         "model": model_name,
         "max_tokens": max_tokens,
         "system": system_prompt,
@@ -82,34 +76,73 @@ def _call_claude(model_name, system_prompt, user_prompt, effort=None, thinking="
         "temperature": temp,
     }
     if thinking_cfg is not None:
-        kwargs["thinking"] = thinking_cfg
+        params["thinking"] = thinking_cfg
     if effort and effort != "none":
-        # SDK 버전과 무관하게 동작하도록 extra_body로 전달
-        kwargs["extra_body"] = {"output_config": {"effort": effort}}
+        params["output_config"] = {"effort": effort}
 
-    response = client_claude.messages.create(**kwargs)
-
-    thinking_content, text_content = "", ""
-    for block in response.content:
-        if block.type == "thinking":
-            thinking_content += block.thinking
-        elif block.type == "text":
-            text_content += block.text
-
-    if getattr(response, "stop_reason", None) == "max_tokens":
-        print(f"\n⚠️ [Warning] {model_name}: max_tokens({max_tokens})에 도달해 응답이 잘렸을 수 있습니다.")
-
-    usage = getattr(response, "usage", None)
     meta = {
         "thinking_setting": thinking if thinking != "default" else ("default(adaptive)" if is_opus else "default(none)"),
         "temperature": temp,
         "effort": effort or "",
-        "output_tokens": getattr(usage, "output_tokens", None),
-        "thinking_chars": len(thinking_content),
-        "stop_reason": getattr(response, "stop_reason", None),
     }
-    # utils.process_result_json이 thinking / text를 바로 매핑할 수 있도록 딕셔너리로 반환
+    return params, meta
+
+
+def parse_claude_message(message, meta):
+    """Message 객체 -> {"thinking", "text", "meta"} (utils.process_result_json이 바로 쓰는 형식)."""
+    thinking_content, text_content = "", ""
+    for block in message.content:
+        if block.type == "thinking":
+            thinking_content += block.thinking
+        elif block.type == "text":
+            text_content += block.text
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        print(f"\n⚠️ [Warning] max_tokens에 도달해 응답이 잘렸을 수 있습니다.")
+    usage = getattr(message, "usage", None)
+    meta = dict(meta, output_tokens=getattr(usage, "output_tokens", None),
+                input_tokens=getattr(usage, "input_tokens", None),
+                thinking_chars=len(thinking_content), stop_reason=stop_reason)
     return {"thinking": thinking_content, "text": text_content, "meta": meta}
+
+
+def _call_claude(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
+    """Claude 단건 호출. Returns: {"thinking": str, "text": str, "meta": dict}"""
+    params, meta = build_claude_params(model_name, system_prompt, user_prompt, effort, thinking, temperature)
+    if "output_config" in params:
+        # SDK 버전과 무관하게 동작하도록 extra_body로 전달
+        params["extra_body"] = {"output_config": params.pop("output_config")}
+    response = client_claude.messages.create(**params)
+    return parse_claude_message(response, meta)
+
+
+# ==============================================================================
+# Message Batches API (Claude 전용): 요청마다 독립 처리, 50% 할인, 보통 24시간 이내 완료
+# ==============================================================================
+def submit_claude_batch(requests):
+    """requests: [(custom_id, params dict), ...] -> batch id"""
+    batch = client_claude.messages.batches.create(
+        requests=[{"custom_id": cid, "params": params} for cid, params in requests])
+    return batch.id
+
+
+def get_claude_batch(batch_id):
+    """Returns: (processing_status, request_counts dict)"""
+    b = client_claude.messages.batches.retrieve(batch_id)
+    rc = b.request_counts
+    counts = {k: getattr(rc, k, None) for k in ("processing", "succeeded", "errored", "canceled", "expired")}
+    return b.processing_status, counts
+
+
+def iter_claude_batch_results(batch_id):
+    """Yields: (custom_id, "succeeded" | "errored" | "canceled" | "expired", Message 또는 오류 문자열)"""
+    for item in client_claude.messages.batches.results(batch_id):
+        outcome = item.result
+        if outcome.type == "succeeded":
+            yield item.custom_id, "succeeded", outcome.message
+        else:
+            err = getattr(outcome, "error", None)
+            yield item.custom_id, outcome.type, str(err) if err is not None else outcome.type
 
 
 def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):

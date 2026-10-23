@@ -454,7 +454,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=False, default="dummy", help="Model name (e.g., gpt-4o)")
     parser.add_argument("--condition", type=str, required=False, default="dummy", help="Condition (e.g., vanilla, reasoning, oneshot)")
     # 💡 [수정] --ref 인자 추가
-    parser.add_argument("--mode_dir", type=str, default="everystep", help="everystep, prefixstep, prefixstep_cur 등 결과 하위 폴더")
+    parser.add_argument("--mode_dir", type=str, default="everystep", help="everystep, prefixstep, prefixstep/thinking_off 등 결과 하위 폴더")
     parser.add_argument("--ref", type=str, required=False, help="Reference model for generating experiment data (e.g., btom)")
     args = parser.parse_args()
 
