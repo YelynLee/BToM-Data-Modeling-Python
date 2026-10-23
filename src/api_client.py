@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+try:
+    from src.llm_requests import parse_response_body, _as_dict
+except ImportError:
+    from llm_requests import parse_response_body, _as_dict
+
 # ==============================================================================
 # 1. 실험 설정
 # ==============================================================================
@@ -152,6 +157,9 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
     thinking: "default" | "on" | "off"  (현재 Claude에만 적용. 다른 모델은 effort로 추론량을 조절)
     temperature: None이면 기존 기본값(TEMPERATURE). temperature를 받는 모델(gpt-4o, gemini-2.5,
                  deepseek, thinking을 끈 Claude)에만 적용됨.
+
+    Returns: {"thinking": str, "text": str, "meta": {input/output/reasoning 토큰 수 등}} (모든 제공사 공통)
+             실패 시 None
     """
     temp = temperature if temperature is not None else TEMPERATURE
     retry_count = 0
@@ -183,7 +191,11 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
                 # 새로운 responses.create 엔드포인트 사용
                 response = client_gpt.responses.create(**kwargs)
 
-                return response.output_text
+                # 원문 + 토큰 수(추론 토큰 포함)를 함께 반환
+                out = parse_response_body("openai_responses", response, {"effort": effort or ""})
+                if getattr(response, "output_text", None):
+                    out["text"] = response.output_text
+                return out
 
             # ----------------------------------------
             # CASE 1-2: GPT Standard (gpt-4o)
@@ -198,7 +210,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
                     temperature=temp,
                     response_format={"type": "json_object"}
                 )
-                return response.choices[0].message.content
+                return parse_response_body("openai_chat", response, {"temperature": temp})
 
             # ----------------------------------------
             # CASE 2-1: Gemini 3.5 Series (공식 SDK 사용)
@@ -224,7 +236,13 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
                     contents=user_prompt,
                     config=config
                 )
-                return response.text
+                u = _as_dict(getattr(response, "usage_metadata", None))
+                return {"thinking": "", "text": response.text or "",
+                        "meta": {"effort": effort or "",
+                                 "input_tokens": u.get("prompt_token_count"),
+                                 "output_tokens": u.get("candidates_token_count"),
+                                 "reasoning_tokens": u.get("thoughts_token_count"),
+                                 "thinking_chars": 0}}
 
             # ----------------------------------------
             # CASE 2-2: 기존 Gemini Series (OpenAI 호환 API 유지)
@@ -239,7 +257,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
                     temperature=temp,
                     response_format={"type": "json_object"}
                 )
-                return response.choices[0].message.content
+                return parse_response_body("gemini_compat", response, {"temperature": temp})
             
             # ----------------------------------------
             # CASE 3: Deepseek Series
@@ -262,8 +280,8 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
                     
                 response = client_deepseek.chat.completions.create(**kwargs)
                 
-                # 결과 반환 (추론 과정은 무시하고 최종 답변만 반환)
-                return response.choices[0].message.content
+                # 최종 답변 + 추론 과정(reasoning_content, deepseek-reasoner) + 토큰 수
+                return parse_response_body("deepseek", response, {"temperature": temp})
             
             # ----------------------------------------
             # CASE 4: Claude Series (Opus / Sonnet) - thinking / effort / temperature 제어
