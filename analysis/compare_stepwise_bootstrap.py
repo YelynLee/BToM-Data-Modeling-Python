@@ -6,8 +6,10 @@ Stepwise 조건(everystep / prefixstep 등) 비교 + 신뢰구간 / 검정.
 지표
   1) rm_corr (calc_everystep_correlation.py와 같은 정의): 옵션별, 시나리오 내 평균을 뺀 뒤의 상관
        belief: L / M / Empty,  desire: K / L / M  ×  ref: BToM / Hindsight  (+ 옵션 평균, BToM - Hindsight)
-  2) VPA (everystep_vpa_analysis.py와 같은 정의, belief): 고유 adjusted R^2 + 표준화 β(부호)
-       예측변수: btom, truebelief, nocost, motionheuristic, hindsight  (CI를 위해 0으로 자르지 않음)
+  2) VPA (everystep_vpa_analysis.py와 같은 정의): 고유 adjusted R^2 + 표준화 β(부호)
+       belief 예측변수: btom, truebelief, nocost, motionheuristic, hindsight  (CI를 위해 0으로 자르지 않음)
+       desire 예측변수: btom, truebelief, nocost, motionheuristic (Hindsight desire = BToM)
+       -> 조건별 좌우 패널 그림 stepwise_vpa_full.png
   3) hindsight 지수 (belief): 시나리오마다 h_s = Σ_t (LLM - BToM)·(Hind - BToM) / Σ_t ||Hind - BToM||^2
        = LLM이 BToM에서 벗어난 정도를 Hindsight가 BToM에서 벗어난 방향에 투영한 기울기 (원점 통과 회귀).
        0 = BToM과 같음, 1 = Hindsight만큼 벗어남, 1 초과 = Hindsight보다 더 크게 같은 방향으로 벗어남.
@@ -183,9 +185,10 @@ class Engine:
             return {}
         yz = (y - y.mean()) / y.std()
         Xz = (X[:, keep] - X[:, keep].mean(axis=0)) / X[:, keep].std(axis=0)
-        full = _adj_r2(yz, Xz)
+        full, beta = _adj_r2(yz, Xz, return_beta=True)
         out = {"total": full}
         for i, r in enumerate(names):
+            out[f"beta_{r}"] = beta[i]
             out[f"simple_{r}"] = float(np.corrcoef(yz, Xz[:, i])[0, 1] ** 2)   # 단독 R² (공유 분산 포함)
             out[f"unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1)) if Xz.shape[1] > 1 else full
         return out
@@ -251,6 +254,10 @@ class Engine:
         for i, r in enumerate(names):
             out[f"vpa_belief_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
             out[f"vpa_belief_beta_{r}"] = beta[i]
+        # 2-1) VPA (desire): 논문과 같은 예측변수 (Hindsight desire는 BToM과 같아 제외)
+        for k, v in self._vpa(agg, rw, np.ones(len(agg), bool), "desire").items():
+            if not k.startswith("simple_"):
+                out[f"vpa_desire_{k}"] = v
         # 3) hindsight 지수 / 4) |LLM - BToM|
         all_rows = np.ones(len(agg), bool)
         h_sc = self.hindsight_by_scenario(agg, all_rows)
@@ -360,6 +367,52 @@ PVPA_COLORS = {"btom": "#E63946", "truebelief": "#F5A623", "nocost": "#DC91EB",
 PVPA_NAMES = {"btom": "BToM", "truebelief": "TrueBelief", "nocost": "NoCost",
               "motionheuristic": "MotionHeuristic", "hindsight": "Hindsight"}
 PVPA_XLAB = {3: "See G2", 4: "Stop", 5: "Return G1 /\nAppr G2", 6: "Selected"}
+
+
+def plot_vpa_full(res, labels, n_subjects, out_path, n_scen):
+    """전체 스텝 VPA. 행: desire / belief, 열: 조건. 막대: 고유 adjusted R² (95% CI), 오른쪽 숫자: 표준화 β"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, len(labels), figsize=(4.6 * len(labels), 6.4), squeeze=False)
+    for r, score in enumerate(("desire", "belief")):
+        refs = PVPA_PRED[score]
+        xmax = 0
+        for c, lab in enumerate(labels):
+            ax = axes[r, c]
+            sub = res[res["condition"] == lab].set_index("metric")
+            for i, ref in enumerate(refs):
+                k = f"vpa_{score}_unique_{ref}"
+                if k not in sub.index or pd.isna(sub.loc[k, "estimate"]):
+                    ax.text(0.002, i, "constant (dropped)", va="center", fontsize=8, color="#999999")
+                    continue
+                est, lo, hi = sub.loc[k, ["estimate", "ci_low", "ci_high"]]
+                ax.barh(i, est, color=PVPA_COLORS[ref], height=0.62)
+                ax.plot([lo, hi], [i, i], color="#333333", lw=1.3)
+                b = sub["estimate"].get(f"vpa_{score}_beta_{ref}", np.nan)
+                ax.text(1.0, i, f"β {b:+.2f}", transform=ax.get_yaxis_transform(), ha="left", va="center",
+                        fontsize=8.5, color="#C0392B" if b < 0 else "#333333")
+                xmax = max(xmax, hi if pd.notna(hi) else est)
+            tot = sub["estimate"].get(f"vpa_{score}_total", np.nan)
+            ax.set_yticks(range(len(refs)))
+            ax.set_yticklabels([PVPA_NAMES[x] for x in refs] if c == 0 else [], fontsize=9.5)
+            ax.invert_yaxis()
+            ax.axvline(0, color="#999999", lw=0.8)
+            ax.grid(axis="x", color="#EEEEEE", lw=0.6)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            head = f"{lab}\n({n_subjects[c]} subjects)\n\n" if r == 0 else ""
+            ax.set_title(f"{head}{score.capitalize()} · total adj. R² = {tot:.2f}", fontsize=10.5, loc="center")
+            if r == 1:
+                ax.set_xlabel("Unique adjusted R²", fontsize=9.5)
+        for c in range(len(labels)):
+            axes[r, c].set_xlim(min(-0.02, axes[r, c].get_xlim()[0]), xmax * 1.08 + 0.01)
+    fig.suptitle(f"Variance partitioning over all steps ({n_scen} scenarios, 95% bootstrap CI; "
+                 "β = standardized coefficient, red = negative)", fontsize=12, y=1.01)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✅ saved: {out_path}")
 
 
 def plot_phase_vpa(res, labels, n_subjects, out_path, title=None, kind="unique"):
@@ -537,6 +590,8 @@ def main():
     if perm_rows:
         pd.concat(perm_rows).to_csv(os.path.join(args.out_dir, "stepwise_scenario_level.csv"), index=False)
     plot_summary(res, args.labels, os.path.join(args.out_dir, "stepwise_bootstrap_summary.png"), args.title)
+    plot_vpa_full(res, args.labels, [a.shape[0] for a in arrays],
+                  os.path.join(args.out_dir, "stepwise_vpa_full.png"), len(scen_ids))
     if eng.pvpa_mask is not None:
         for kind, fn in (("unique", "stepwise_phase_vpa.png"), ("simple", "stepwise_phase_vpa_simple.png")):
             plot_phase_vpa(res, args.labels, [a.shape[0] for a in arrays], os.path.join(args.out_dir, fn), kind=kind)
