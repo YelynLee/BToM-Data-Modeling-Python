@@ -183,7 +183,7 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
 # 오류 행 재파싱: 원문(raw_response)이 남아 있는 파싱 실패 행을 API 호출 없이 다시 읽음
 # =========================================================================
 CARRY_COLS = ['thinking_setting', 'temperature', 'effort', 'output_tokens', 'input_tokens', 'thinking_chars',
-              'stop_reason', 'belief_order', 'internal_thinking']
+              'stop_reason', 'belief_order', 'internal_thinking', 'reasoning_tokens']
 
 
 def reparse_error_rows(filename, units, mode, condition, model_name):
@@ -212,7 +212,9 @@ def reparse_error_rows(filename, units, mode, condition, model_name):
         if 'error' in rows[0]:
             keep.append(r.to_dict())
             continue
-        for new in rows:
+        for i, new in enumerate(rows):
+            new['n_judgements'] = len(rows)
+            new['response_text'] = raw if i == 0 else None
             for c in CARRY_COLS + [c for c in df.columns if c.startswith('probe_')]:
                 if c in r and pd.notna(r[c]) and c not in new:
                     new[c] = r[c]
@@ -225,26 +227,35 @@ def reparse_error_rows(filename, units, mode, condition, model_name):
 
 
 # =========================================================================
-# Batch 실행 (Claude Message Batches API)
+# Batch 실행 (Claude / OpenAI / Gemini Batch API)
 # =========================================================================
 def _custom_id(subject_idx, key):
     sc_id, t_cut = key
     return f"s{subject_idx:02d}_sc{int(sc_id):02d}_t{int(t_cut or 0):02d}"
 
 
+def parse_custom_id(cid):
+    """'s01_sc40_t05' -> (subject, (scenario_id, t_cut 또는 None))"""
+    subj = int(cid[1:3])
+    sc = int(cid.split("_sc")[1].split("_")[0])
+    t = int(cid.split("_t")[1])
+    return subj, (sc, t if t else None)
+
+
 def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_call, to_rows,
               effort, thinking, temperature, poll_seconds=60):
     """
     남은 작업 단위를 모든 피험자에 걸쳐 하나의 Batch로 제출하고, 끝나면 결과를 피험자별 CSV에 기록함.
+    지원: Claude / OpenAI / Gemini (src/batch_api.py). 요청 내용은 단건 호출과 같은 설정(src/llm_requests.py).
     - 요청은 서로 독립적으로 처리됨 (호출마다 새 대화)
-    - batch_state.json에 제출한 batch id를 남겨, 중간에 멈춰도 같은 명령으로 다시 실행하면
+    - batch_state.json에 제출한 batch 정보를 남겨, 중간에 멈춰도 같은 명령으로 다시 실행하면
       재제출하지 않고 기존 batch를 이어서 기다렸다가 결과를 가져옴
-    - 실패(errored/expired, 파싱 오류)한 요청은 체크포인트에 '미완료'로 남아 다음 실행 때 다시 제출됨
+    - 실패(API 실패, 파싱 오류)한 요청은 체크포인트에 '미완료'로 남아 다음 실행 때 다시 제출됨
     """
-    from src.api_client import (build_claude_params, parse_claude_message, submit_claude_batch,
-                                get_claude_batch, iter_claude_batch_results)
-    if "claude" not in model_name:
-        raise ValueError("--batch는 현재 Claude 모델에서만 지원됩니다.")
+    from src import batch_api
+    from src.llm_requests import build_request, provider_of, BATCH_PROVIDERS
+    if provider_of(model_name) not in BATCH_PROVIDERS:
+        raise ValueError(f"{model_name}: Batch API를 지원하지 않는 제공사입니다. --workers 병렬 호출을 사용하세요.")
 
     state_path = os.path.join(save_dir, "batch_state.json")
     state = json.load(open(state_path)) if os.path.exists(state_path) else {"batches": []}
@@ -258,68 +269,60 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
 
     # 1) 아직 결과를 가져오지 않은 batch가 없으면 남은 작업을 새로 제출
     if not pending:
-        requests, n_left = [], 0
+        requests = []
         for subject_idx in range(1, num_subjects + 1):
             _, results = load_subject(subject_idx)
             for unit in units:
                 if unit[0] in results:
                     continue
                 sys_prompt, user_prompt, _, _ = prepare_call(subject_idx, unit)
-                params, _ = build_claude_params(model_name, sys_prompt, user_prompt, effort, thinking, temperature)
-                requests.append((_custom_id(subject_idx, unit[0]), params))
-                n_left += 1
+                spec = build_request(model_name, sys_prompt, user_prompt, effort, thinking, temperature,
+                                     for_batch=True)
+                requests.append((_custom_id(subject_idx, unit[0]), spec))
         if not requests:
             print("⏩ 모든 작업 단위가 이미 완료되었습니다.")
             return
-        print(f"📤 Batch 제출: 요청 {len(requests)}개 (피험자 {num_subjects}명)")
-        batch_id = submit_claude_batch(requests)
-        state["batches"].append({"id": batch_id, "n_requests": len(requests),
-                                 "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+        print(f"📤 Batch 제출 ({requests[0][1].provider}): 요청 {len(requests)}개 (피험자 {num_subjects}명)")
+        job = batch_api.submit(model_name, requests, save_dir)
+        job.update(n_requests=len(requests), submitted_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        state["batches"].append(job)
         save_state()
-        print(f"   batch id: {batch_id}  (상태 파일: {state_path})")
+        print(f"   batch id: {job['id']}  (상태 파일: {state_path})")
         pending = [state["batches"][-1]]
 
     # 2) 끝날 때까지 대기
-    #    request_counts는 API가 보고하는 값을 그대로 보여줌. 처리 중에는 succeeded가 0으로 머물다가
+    #    완료 수는 제공사가 보고하는 값을 그대로 보여줌. 처리 중에는 0으로 머물다가
     #    batch가 끝날 때 한꺼번에 바뀌는 경우가 있어, 경과 시간을 함께 표시하고 같은 상태는 한 줄로 줄임.
     for b in pending:
         t0, last = time.time(), None
         while True:
-            status, counts = get_claude_batch(b["id"])
+            ended, label, c = batch_api.status(b)
             elapsed = int(time.time() - t0)
-            poll_state = (status, tuple(sorted(counts.items())))
-            done = sum(v or 0 for k, v in counts.items() if k != "processing")
-            total = done + (counts.get("processing") or 0)
-            if poll_state != last or status == "ended":
-                print(f"⏳ [{time.strftime('%H:%M:%S')}] {b['id']}: {status} | 완료 {done}/{total} "
-                      f"(succeeded {counts.get('succeeded')}, errored {counts.get('errored')}, "
-                      f"expired {counts.get('expired')}) | 경과 {elapsed // 60}분 {elapsed % 60}초")
-                if status != "ended" and done == 0:
+            poll_state = (label, c.get("done"), c.get("failed"))
+            if poll_state != last or ended:
+                print(f"⏳ [{time.strftime('%H:%M:%S')}] {b['id']}: {label} | 완료 {c.get('done')}/{c.get('total')} "
+                      f"(succeeded {c.get('succeeded')}, failed {c.get('failed')}) | 경과 {elapsed // 60}분 {elapsed % 60}초")
+                if not ended and not c.get("done"):
                     print("   (처리 중에는 완료 수가 0으로 보이다가 끝날 때 한꺼번에 갱신될 수 있습니다)")
             else:
-                print(f"   ... {status}, 경과 {elapsed // 60}분 {elapsed % 60}초", end="\r")
+                print(f"   ... {label}, 경과 {elapsed // 60}분 {elapsed % 60}초", end="\r")
             last = poll_state
-            if status == "ended":
+            if ended:
                 break
             time.sleep(poll_seconds)
 
         # 3) 결과 수집 -> 피험자별 CSV에 반영
-        params_meta = {}
         by_subject = {}
-        for cid, kind, payload in iter_claude_batch_results(b["id"]):
-            subj = int(cid[1:3]); sc = int(cid.split("_sc")[1].split("_")[0]); t = int(cid.split("_t")[1])
-            key = (sc, t if t else None)
+        for cid, kind, payload in batch_api.results(b):
+            subj, key = parse_custom_id(cid)
             unit = unit_by_key.get(key)
             if unit is None:
                 continue  # 이번 실행 범위 밖의 요청 (예: 시나리오 범위를 바꾼 경우)
             sys_prompt, user_prompt, order, probes = prepare_call(subj, unit)
             if kind == "succeeded":
-                if subj not in params_meta:
-                    params_meta[subj] = build_claude_params(model_name, "", "", effort, thinking, temperature)[1]
-                response = parse_claude_message(payload, params_meta[subj])
-                rows = to_rows(response, unit, order, probes)
+                rows = to_rows(payload, unit, order, probes)
             else:
-                rows = [{'scenario_id': sc, 'time_step': unit[2], 'error': f'batch {kind}: {payload}',
+                rows = [{'scenario_id': key[0], 'time_step': unit[2], 'error': f'batch {kind}: {payload}',
                          'model': model_name}]
             by_subject.setdefault(subj, {})[key] = rows
 
@@ -334,21 +337,66 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
         n_api_fail = sum(1 for rows in all_rows if str(rows[0].get('error', '')).startswith('batch '))
         n_parse_fail = sum(1 for rows in all_rows if 'error' in rows[0]) - n_api_fail
         n_recovered = sum(1 for rows in all_rows if rows[0].get('parse_recovered'))
+        n_missing = (b.get("n_requests") or 0) - len(all_rows)
         print(f"✅ Batch {b['id']} 결과 반영 완료: 피험자 {len(by_subject)}명, 응답 {len(all_rows)}건 "
-              f"(API 실패 {n_api_fail}, 파싱 실패 {n_parse_fail}, 비표준 JSON 복구 {n_recovered})")
-        if n_api_fail or n_parse_fail:
+              f"(API 실패 {n_api_fail}, 파싱 실패 {n_parse_fail}, 비표준 JSON 복구 {n_recovered}"
+              + (f", 결과 없음 {n_missing}" if n_missing > 0 else "") + ")")
+        if n_api_fail or n_parse_fail or n_missing > 0:
             print("   ↪ API의 succeeded는 '응답을 받음'이라는 뜻이라, 받은 응답의 파싱 실패는 별도로 셉니다.")
-            print("   ↪ 같은 명령을 다시 실행하면 실패한 요청만 새 batch로 다시 제출합니다.")
+            print("   ↪ 같은 명령을 다시 실행하면 실패하거나 빠진 요청만 새 batch로 다시 제출합니다.")
 
 
 # =========================================================================
 # 메인 실험 루프
 # =========================================================================
+def run_parallel(model_name, units, num_subjects, load_subject, prepare_call, to_rows,
+                 effort, thinking, temperature, workers):
+    """
+    Batch API가 없는 모델(DeepSeek 등)이나 빨리 끝내야 할 때: 단건 호출을 workers개 스레드로 동시에 보냄.
+    - 호출마다 새 대화라는 점은 순차 실행과 같음 (호출 순서만 달라짐)
+    - 응답이 올 때마다 해당 피험자 CSV에 저장 -> 중간에 끊겨도 같은 명령으로 이어서 진행
+    - Rate limit 오류는 api_client의 재시도에 맡기고, 실패한 단위는 'API Fail'로 남아 다음 실행 때 다시 호출됨
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    state = {}
+    jobs = []
+    for subject_idx in range(1, num_subjects + 1):
+        filename, results = load_subject(subject_idx)
+        state[subject_idx] = (filename, results)
+        jobs += [(subject_idx, u) for u in units if u[0] not in results]
+    if not jobs:
+        print("⏩ 모든 작업 단위가 이미 완료되었습니다.")
+        return
+    print(f"⚡ 병렬 호출: 작업 {len(jobs)}개, 동시 {workers}개")
+    lock = threading.Lock()
+
+    def work(subject_idx, unit):
+        sys_prompt, user_prompt, order, probes = prepare_call(subject_idx, unit)
+        response = call_model_api(model_name, sys_prompt, user_prompt, effort=effort,
+                                  thinking=thinking, temperature=temperature)
+        return subject_idx, unit, to_rows(response, unit, order, probes)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(work, s_idx, u) for s_idx, u in jobs]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="calls"):
+            try:
+                subject_idx, unit, rows = fut.result()
+            except Exception as e:
+                print(f"\n⚠️ 호출 실패: {e}")
+                continue
+            with lock:
+                filename, results = state[subject_idx]
+                results[unit[0]] = rows
+                save_rows(results, filename)
+
+
 def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, version="",
                    scenarios="all", scenario_ids=None, current_belief=False,
                    belief_order="random", mask_hidden=False, preview=False,
                    legacy_wording=True, order_seed=0, thinking="default", temperature=None,
-                   batch=False, batch_poll=60):
+                   batch=False, batch_poll=60, workers=1):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
@@ -453,7 +501,13 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
         meta_info = response.get("meta") if isinstance(response, dict) else None
         if meta_info:
             for r in rows:
-                r.update(meta_info)  # thinking 설정, temperature, 출력 토큰 수 등
+                r.update(meta_info)  # thinking 설정, temperature, 출력·추론 토큰 수 등
+        if response:
+            text = response.get("text", "") if isinstance(response, dict) else str(response)
+            for i, r in enumerate(rows):
+                r['n_judgements'] = len(rows)   # 한 응답이 답한 스텝 수 (판단당 토큰 = output_tokens / n_judgements)
+                # 응답 원문: Every-step처럼 한 응답이 여러 행이면 첫 행에만 저장 (CSV 크기 절약)
+                r['response_text'] = text if i == 0 else None
         return rows
 
     def load_subject(subject_idx):
@@ -474,6 +528,9 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     if batch:
         run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_call, to_rows,
                   effort, thinking, temperature, batch_poll)
+    elif workers > 1:
+        run_parallel(model_name, units, num_subjects, load_subject, prepare_call, to_rows,
+                     effort, thinking, temperature, workers)
     else:
         for subject_idx in range(1, num_subjects + 1):
             filename, results = load_subject(subject_idx)
@@ -496,6 +553,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
 
             print(f"✅ Subject {subject_idx} Saved.")
 
+    if not batch:
         # 남은 오류(API 실패, 파싱 오류) 안내
         n_err = sum(1 for i in range(1, num_subjects + 1)
                     for u in units if u[0] not in load_subject(i)[1])
@@ -553,7 +611,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--preview", action="store_true", help="API 호출 없이 생성될 프롬프트만 출력")
     parser.add_argument("--batch", action="store_true",
-                        help="Claude Message Batches API로 실행 (50%% 할인, 요청마다 독립 처리). 중단 후 같은 명령으로 재개")
+                        help="Batch API로 실행 (Claude / OpenAI / Gemini, 50%% 할인, 요청마다 독립 처리). 중단 후 같은 명령으로 재개")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="단건 호출을 동시에 보낼 개수 (Batch가 없는 DeepSeek 등). 기본 1 = 순차 호출")
     parser.add_argument("--batch_poll", type=int, default=60, help="Batch 상태 확인 간격(초)")
 
     args = parser.parse_args()
@@ -575,8 +635,12 @@ if __name__ == "__main__":
             parser.error("--effort none과 --thinking on은 함께 쓸 수 없습니다.")
         print("💡 Claude에는 'none' effort가 없어 --thinking off로 처리합니다.")
         args.thinking, args.effort = "off", None
-    if args.batch and not is_claude:
-        parser.error("--batch는 현재 Claude 모델에서만 지원됩니다.")
+    from src.llm_requests import provider_of, BATCH_PROVIDERS
+    if args.batch and provider_of(args.model) not in BATCH_PROVIDERS:
+        parser.error(f"--batch는 Claude / OpenAI / Gemini 모델에서만 지원됩니다 ({args.model}). "
+                     "대신 --workers 8 처럼 병렬 호출을 사용하세요.")
+    if args.batch and args.workers > 1:
+        parser.error("--batch와 --workers는 함께 쓸 수 없습니다.")
     if args.thinking != "default" and not is_claude:
         parser.error("--thinking은 현재 Claude 모델에만 적용됩니다. 다른 모델은 --effort로 추론량을 조절하세요.")
     thinking_used = args.thinking == "on" or (args.thinking == "default" and "claude-opus" in args.model)
@@ -590,4 +654,4 @@ if __name__ == "__main__":
                    belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
                    legacy_wording=not args.new_wording, order_seed=args.order_seed,
                    thinking=args.thinking, temperature=args.temperature,
-                   batch=args.batch, batch_poll=args.batch_poll)
+                   batch=args.batch, batch_poll=args.batch_poll, workers=args.workers)
