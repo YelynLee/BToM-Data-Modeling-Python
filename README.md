@@ -203,7 +203,8 @@ python analysis/endstep_stats.py --condition vanilla --out_dir results/stats
 # Stepwise 조건 비교: rm_corr, VPA(고유 R² + β), hindsight 지수(전체/구간별), |LLM - BToM|
 #   2단계 bootstrap(시나리오 -> 피험자) CI, 첫 조건 대비 paired 차이 CI / p, 시나리오 단위 sign-flip 순열 검정,
 #   --match_subjects k: 첫 조건에서 k명씩 뽑아 피험자 수 차이의 영향 확인
-#   --phase_vpa: See G2 이후 구간별 VPA (Check 그룹 1,2,4) -> stepwise_phase_vpa.png(고유 R²), stepwise_phase_vpa_simple.png(단독 R²)
+#   전체 VPA 좌우 비교 그림: stepwise_vpa_full.png (desire / belief, 고유 R² + β)
+#   --phase_vpa: (보조) See G2 이후 구간별 VPA (Check 그룹 1,2,4) -> stepwise_phase_vpa.png(고유 R²), stepwise_phase_vpa_simple.png(단독 R²)
 python analysis/compare_stepwise_bootstrap.py \
   --input results/claude-opus-4-6/vanilla/everystep/everystep_valid_only.csv results/claude-opus-4-6/vanilla/prefixstep/thinking_off \
   --labels "Every-step" "Prefix-step" --groups 1,4 --match_subjects 5 --out_dir results/claude-opus-4-6/vanilla/compare
