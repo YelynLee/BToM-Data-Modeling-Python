@@ -21,6 +21,15 @@ Stepwise 조건(everystep / prefixstep 등) 비교 + 신뢰구간 / 검정.
   - 첫 조건 대비 차이: 같은 시나리오 리샘플에서의 차이 분포 -> CI, bootstrap p
 검정 (첫 조건 대비)
   - 시나리오 단위 paired sign-flip 순열 검정: hindsight 지수, |LLM - BToM| (시나리오 평균 차이)
+구간별 VPA (--phase_vpa, 별도 그림 stepwise_phase_vpa.png)
+  - Check 그룹(1 Check-GoBack Present, 2 Check-Stay Present, 4 Check-GoBack Absent)만 사용: 같은 phase 순서를 공유
+  - See G2 이후 구간(See G2, Stop, Return G1 / Appr G2, Selected)마다 따로 VPA (그 구간의 스텝만으로 회귀)
+    See G2 이전에는 BToM과 Hindsight belief 예측의 상관이 1이라 고유 R²가 정의상 0이므로 제외
+  - desire 예측변수: btom, truebelief, nocost, motionheuristic (Hindsight desire는 BToM과 같음, 논문과 동일)
+    belief 예측변수: + hindsight. 구간 안에서 상수인 예측변수(예: NoCost belief)는 자동으로 빠짐
+  - 고유 adjusted R²(0으로 자르지 않음) + total R², 2단계 bootstrap CI, 첫 조건 대비 차이 CI (탐색적)
+  - 같은 구간 안에서는 예측변수끼리 많이 겹쳐(공유 분산) 고유 R²가 작게 나오므로, 단독 R²(예측변수 하나만 쓴 R²)
+    그림도 함께 저장 (stepwise_phase_vpa_simple.png)
 피험자 수 맞추기
   - --match_subjects k: 첫 조건(보통 Every-step 16명)에서 k명을 무작위로 여러 번 뽑아 지표 분포를 보고
     (피험자 수 차이가 결론을 바꾸지 않는지 확인)
@@ -60,6 +69,11 @@ VPA_REFS = ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]
 ALL_REFS = sorted(set(CORR_REFS) | set(VPA_REFS))
 H_EPS = 0.05
 PHASE_NAMES = {0: "Start", 1: "Appr G1", 2: "Pass G1", 3: "See G2", 4: "Stop", 5: "Return/Appr G2", 6: "Selected"}
+# 구간별 VPA
+PVPA_GROUPS = (1, 2, 4)
+PVPA_PHASES = (3, 4, 5, 6)
+PVPA_PRED = {"desire": ["btom", "truebelief", "nocost", "motionheuristic"], "belief": VPA_REFS}
+PVPA_SLICE = {"desire": slice(0, 3), "belief": BEL}
 
 
 # =========================================================================
@@ -151,6 +165,39 @@ class Engine:
         self.h_den = (d ** 2).sum(axis=1)
         self.h_ok = self.h_den >= H_EPS ** 2
         self.h_dir = d
+        self.pvpa_mask = None   # --phase_vpa일 때 Check 그룹 행 mask
+
+    def _vpa(self, agg, rw, mask, score):
+        """mask 행만으로 VPA. Returns: {total, unique_<ref>} (예측변수가 상수인 ref는 빠짐)"""
+        sl = PVPA_SLICE[score]
+        rep = np.repeat(np.where(mask)[0], rw[mask].astype(int))
+        if len(rep) < 10:
+            return {}
+        y = agg[rep][:, sl].ravel(order="F")
+        X = np.column_stack([self.refs[r][rep][:, sl].ravel(order="F") for r in PVPA_PRED[score]])
+        ok = ~np.isnan(y) & ~np.isnan(X).any(axis=1)
+        y, X = y[ok], X[ok]
+        keep = X.std(axis=0) > 1e-9
+        names = [r for r, k in zip(PVPA_PRED[score], keep) if k]
+        if y.std() == 0 or not names:
+            return {}
+        yz = (y - y.mean()) / y.std()
+        Xz = (X[:, keep] - X[:, keep].mean(axis=0)) / X[:, keep].std(axis=0)
+        full = _adj_r2(yz, Xz)
+        out = {"total": full}
+        for i, r in enumerate(names):
+            out[f"simple_{r}"] = float(np.corrcoef(yz, Xz[:, i])[0, 1] ** 2)   # 단독 R² (공유 분산 포함)
+            out[f"unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1)) if Xz.shape[1] > 1 else full
+        return out
+
+    def phase_vpa(self, agg, rw):
+        out = {}
+        for score in ("desire", "belief"):
+            for p in PVPA_PHASES:
+                m = self.pvpa_mask & (self.phase == p)
+                for k, v in self._vpa(agg, rw, m, score).items():
+                    out[f"pvpa_{score}_phase{p}_{k}"] = v
+        return out
 
     def _center(self, x):
         """시나리오 내 평균 제거"""
@@ -215,6 +262,8 @@ class Engine:
             m = self.h_ok & (self.phase == p)
             if m.any():
                 out[f"hindsight_index_phase{p}"] = _wmean(self.hindsight_by_scenario(agg, self.phase == p), sw)
+        if self.pvpa_mask is not None:
+            out.update(self.phase_vpa(agg, rw))
         return out
 
     def scenario_level(self, agg):
@@ -306,6 +355,76 @@ def plot_summary(res, labels, out_path, title):
     print(f"✅ saved: {out_path}")
 
 
+PVPA_COLORS = {"btom": "#E63946", "truebelief": "#F5A623", "nocost": "#DC91EB",
+               "motionheuristic": "#B8969A", "hindsight": "#747ED2"}   # everystep_vpa_analysis.py와 같은 색
+PVPA_NAMES = {"btom": "BToM", "truebelief": "TrueBelief", "nocost": "NoCost",
+              "motionheuristic": "MotionHeuristic", "hindsight": "Hindsight"}
+PVPA_XLAB = {3: "See G2", 4: "Stop", 5: "Return G1 /\nAppr G2", 6: "Selected"}
+
+
+def plot_phase_vpa(res, labels, n_subjects, out_path, title=None, kind="unique"):
+    """행: desire / belief, 열: 조건. 선: 레퍼런스 모델별 고유 adjusted R²(kind=unique) 또는 단독 R²(kind=simple)
+    (+95% CI 띠), 회색 점선: total R²"""
+    ylab = "Unique adjusted R²" if kind == "unique" else "R² (single predictor)"
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.lines as mlines
+    xs = list(PVPA_PHASES)
+    fig, axes = plt.subplots(2, len(labels), figsize=(5.2 * len(labels), 7.4), squeeze=False, sharex=True)
+    for r, score in enumerate(("desire", "belief")):
+        ymax = 0
+        for c, lab in enumerate(labels):
+            ax = axes[r, c]
+            sub = res[res["condition"] == lab].set_index("metric")
+            for ref in ["total"] + PVPA_PRED[score]:
+                key = "total" if ref == "total" else f"{kind}_{ref}"
+                ks = [f"pvpa_{score}_phase{p}_{key}" for p in xs]
+                est = np.array([sub["estimate"].get(k, np.nan) for k in ks], float)
+                if np.all(np.isnan(est)):
+                    continue
+                lo = np.array([sub["ci_low"].get(k, np.nan) for k in ks], float)
+                hi = np.array([sub["ci_high"].get(k, np.nan) for k in ks], float)
+                if ref == "total":
+                    ax.plot(xs, est, color="#888888", ls="--", lw=1.4, marker="o", ms=3.5, zorder=2)
+                else:
+                    col = PVPA_COLORS[ref]
+                    ax.fill_between(xs, lo, hi, color=col, alpha=0.14, lw=0, zorder=1)
+                    ax.plot(xs, est, color=col, lw=2.3, marker="o", ms=5.5, markeredgecolor="white",
+                            markeredgewidth=1, zorder=3)
+                ymax = max(ymax, np.nanmax(np.r_[est, hi]))
+            ax.axhline(0, color="#999999", lw=0.8, zorder=0)
+            ax.set_xticks(xs)
+            ax.set_xticklabels([PVPA_XLAB[p] for p in xs], fontsize=9)
+            ax.grid(axis="y", color="#EEEEEE", lw=0.6)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            if r == 0:
+                ax.set_title(f"{lab}\n({n_subjects[c]} subjects)", fontsize=11.5, fontweight="bold", pad=8)
+            if c == 0:
+                ax.set_ylabel(f"{score.capitalize()}\n\n{ylab}", fontsize=10.5)
+        for c in range(len(labels)):
+            axes[r, c].set_ylim(-0.05, min(1.0, ymax + 0.05))
+        for c in range(1, len(labels)):
+            axes[r, c].sharey(axes[r, 0])
+    handles = [mlines.Line2D([], [], color=PVPA_COLORS[r], lw=2.3, marker="o", ms=5.5, label=PVPA_NAMES[r])
+               for r in PVPA_PRED["belief"]]
+    handles.append(mlines.Line2D([], [], color="#888888", ls="--", lw=1.4, marker="o", ms=3.5,
+                                 label="Total adjusted R² (all predictors)"))
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False, fontsize=9.5,
+               bbox_to_anchor=(0.5, -0.02))
+    default = ("Phase-wise variance partitioning (unique adjusted R², 95% bootstrap CI)" if kind == "unique"
+               else "Phase-wise R² of each reference model alone (shared variance included, 95% bootstrap CI)")
+    fig.suptitle(title or default, fontsize=13, y=1.0)
+    fig.text(0.5, 0.955, "Check groups only (1 Check-GoBack Present, 2 Check-Stay Present, 4 Check-GoBack Absent) · "
+             "phases after Spot 2 becomes visible · Hindsight omitted for desire (identical to BToM)",
+             ha="center", fontsize=9.5, color="#555555")
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✅ saved: {out_path}")
+
+
 # =========================================================================
 def main():
     ap = argparse.ArgumentParser()
@@ -321,6 +440,8 @@ def main():
     ap.add_argument("--n_match", type=int, default=200)
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--title", default="Stepwise conditions vs reference models (95% bootstrap CI)")
+    ap.add_argument("--phase_vpa", action="store_true",
+                    help="See G2 이후 구간별 VPA를 Check 그룹(1,2,4)에서 계산해 별도 그림(stepwise_phase_vpa.png)으로 저장")
     args = ap.parse_args()
     assert len(args.input) == len(args.labels), "--input과 --labels 개수가 같아야 합니다."
     os.makedirs(args.out_dir, exist_ok=True)
@@ -341,6 +462,11 @@ def main():
     rows = row_table(scen_ids)
     refs = ref_arrays(rows, {r: load_reference_everystep(r) for r in ALL_REFS})
     eng = Engine(rows, refs)
+    if args.phase_vpa:
+        eng.pvpa_mask = rows["group_id"].isin(PVPA_GROUPS).to_numpy()
+        if not eng.pvpa_mask.any():
+            print("⚠️ --phase_vpa: Check 그룹(1,2,4) 시나리오가 없어 건너뜁니다.")
+            eng.pvpa_mask = None
     arrays = [subject_array(df[df["scenario_id"].isin(scen_ids)], rows)[0] for df in raws]
     group_of = df_btom.groupby("scenario_id")["group_id"].first().to_dict()
 
@@ -411,6 +537,9 @@ def main():
     if perm_rows:
         pd.concat(perm_rows).to_csv(os.path.join(args.out_dir, "stepwise_scenario_level.csv"), index=False)
     plot_summary(res, args.labels, os.path.join(args.out_dir, "stepwise_bootstrap_summary.png"), args.title)
+    if eng.pvpa_mask is not None:
+        for kind, fn in (("unique", "stepwise_phase_vpa.png"), ("simple", "stepwise_phase_vpa_simple.png")):
+            plot_phase_vpa(res, args.labels, [a.shape[0] for a in arrays], os.path.join(args.out_dir, fn), kind=kind)
     print(f"✅ saved: {os.path.join(args.out_dir, 'stepwise_bootstrap_summary.csv')}")
     return res
 
