@@ -58,18 +58,20 @@ def load_run(path):
     frames = []
     for i, f in enumerate(files, start=1):
         d = pd.read_csv(f)
-        d["subject_id"] = i
+        if "subject_id" not in d.columns or not path.endswith(".csv"):
+            d["subject_id"] = i   # everystep_valid_only.csv처럼 subject_id가 있는 단일 csv는 그대로 사용
         frames.append(d)
     df = pd.concat(frames, ignore_index=True)
     if "error" in df.columns:
         df = df[df["error"].isna()]
-    return keep_complete(df), len(files)
+    return keep_complete(df), df["subject_id"].nunique()
 
 
 def prepare_run(df, score, refs):
     cfg = SCORES[score]
     cols = [f"{cfg['prefix']}_{o}" for o in cfg["options"]]
-    traj_cols = [c for c in df_btom.columns if c not in df.columns or c in ("scenario_id", "time_step")]
+    # 궤적 정보는 항상 df_btom에서 가져옴 (everystep_valid_only.csv처럼 궤적·phase 열이 이미 있는 입력도 지원)
+    traj_cols = [c for c in df_btom.columns if c not in cols + ["subject_id"]]
     merged = df[["subject_id", "scenario_id", "time_step"] + cols].merge(
         df_btom[traj_cols], on=["scenario_id", "time_step"], how="inner")
     merged = apply_phase_labeling(merged)
