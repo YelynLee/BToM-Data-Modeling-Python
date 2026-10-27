@@ -364,7 +364,7 @@ if __name__ == "__main__":
     # 1. 처리할 데이터의 위치를 지정하는 인자들
     parser.add_argument("--model", type=str, help="Model name (e.g., gpt-4o, btom, nocost, truebelief, motionheuristic, human)")
     parser.add_argument("--condition", type=str, help="Experiment condition (e.g., reasoning, oneshot)")
-    parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep", "prefixstep"], help="Analysis mode")
+    parser.add_argument("--mode", type=str, default="normal", choices=["normal", "everystep", "prefixstep", "singlestep"], help="Analysis mode")
     parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과 폴더(*_cur)를 처리")
     parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과 폴더(*_mask)를 처리")
     parser.add_argument("--new_wording", action="store_true", help="'up to step t' 새 문구로 돌린 결과 폴더(*_upto)를 처리")

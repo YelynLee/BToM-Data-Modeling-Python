@@ -18,7 +18,7 @@ from src.dataset import df_btom
 from src.prompts import generate_scenario_prompt
 from src.api_client import call_model_api
 from src.utils import process_result_json, inspect_pickle_data, parse_json_lenient
-from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES, SCENARIO_SUBSETS,
+from src.config import (BASE_RESULTS_DIR, STEPWISE_MODES, PER_STEP_MODES, SCENARIO_SUBSETS,
                         mode_folder, get_scenario_subset)
 from src.data_processor import process_model_results
 from src.control_items import sample_probes
@@ -30,20 +30,23 @@ RAW_JSON_MODES = ("reverse", "control")
 # =========================================================================
 # 작업 단위(Work unit) 구성
 # =========================================================================
-def build_work_units(scenario_groups, mode):
+def build_work_units(scenario_groups, mode, truncate_log=False):
     """
     API 호출 1회에 해당하는 작업 단위 목록을 만듦.
       - prefixstep: (scenario_id, t) 마다 1회. 로그는 1..t로 잘림.
+      - singlestep: (scenario_id, t) 마다 1회. 로그는 전체, 시점 t 하나만 질문 (Every-step-single).
       - 그 외      : scenario 마다 1회. 전체 로그 사용.
     Returns: list of (key, sc_id, t_cut, df_input)
-        key = (sc_id, t_cut)  (t_cut은 prefixstep이 아니면 None)
+        key = (sc_id, t_cut)  (t_cut은 prefixstep / singlestep이 아니면 None)
     """
     units = []
     for sc_id, gdf in scenario_groups:
-        if mode == "prefixstep":
+        if mode in PER_STEP_MODES:
             gdf = gdf.sort_values('time_step')
             for t_cut in gdf['time_step'].astype(int).tolist():
-                units.append(((sc_id, t_cut), sc_id, t_cut, gdf[gdf['time_step'] <= t_cut]))
+                cut = mode == "prefixstep" or truncate_log
+                df_in = gdf[gdf['time_step'] <= t_cut] if cut else gdf
+                units.append(((sc_id, t_cut), sc_id, t_cut, df_in))
         else:
             units.append(((sc_id, None), sc_id, None, gdf))
     return units
@@ -121,7 +124,7 @@ def load_completed_units(filename, mode, current_belief, expected_counts):
                 return False
         return True
 
-    if mode == "prefixstep":
+    if mode in PER_STEP_MODES:
         # (scenario_id, time_step) 단위로 개별 복원 -> 시나리오 중간에서 끊겨도 이어서 진행
         for (sc_id, t), rows in df_existing.groupby(['scenario_id', 'time_step']):
             if len(rows) == 1 and rows_ok(rows):
@@ -170,12 +173,21 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
             return [{'scenario_id': sc_id, 'model': model_name, 'mode': mode,
                      'error': str(e), 'raw_response': raw}]
 
-    # prefixstep은 normal과 같은 단일 객체 형식으로 파싱
+    # prefixstep / singlestep은 normal과 같은 단일 객체 형식으로 파싱
     res = process_result_json(sc_id, meta, response_str, model_name, condition, mode)
     rows = res if isinstance(res, list) else [res]
-    if mode == "prefixstep":
+    if mode in PER_STEP_MODES:
         for r in rows:
-            r['time_step'] = t_cut  # 로그를 자른 길이 = 이 응답이 대응하는 시점
+            r['time_step'] = t_cut  # 이 응답이 대응하는 시점 (prefixstep: 로그를 자른 길이)
+    if mode == "singlestep" and 'error' not in rows[0]:
+        # 모델이 JSON에 적은 time_step이 요청한 시점과 같은지 기록 (다른 스텝에 답한 경우 확인용)
+        raw = response_str.get("text", "") if isinstance(response_str, dict) else response_str
+        try:
+            rep_t = parse_json_lenient(raw, prefer="object", required_key="desire_scores").get("time_step")
+        except Exception:
+            rep_t = None
+        for r in rows:
+            r['reported_time_step'] = rep_t
     return rows
 
 
@@ -203,7 +215,7 @@ def reparse_error_rows(filename, units, mode, condition, model_name):
         if pd.isna(r.get('error')) or not isinstance(raw, str) or not raw.strip():
             keep.append(r.to_dict())
             continue
-        t_cut = int(r['time_step']) if mode == "prefixstep" and pd.notna(r.get('time_step')) else None
+        t_cut = int(r['time_step']) if mode in PER_STEP_MODES and pd.notna(r.get('time_step')) else None
         unit = unit_by_key.get((int(r['scenario_id']), t_cut))
         if unit is None:
             keep.append(r.to_dict())
@@ -396,7 +408,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
                    scenarios="all", scenario_ids=None, current_belief=False,
                    belief_order="random", mask_hidden=False, preview=False,
                    legacy_wording=True, order_seed=0, thinking="default", temperature=None,
-                   batch=False, batch_poll=60, workers=1):
+                   batch=False, batch_poll=60, workers=1, tag="", truncate_log=False):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
@@ -415,11 +427,14 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
 
     # 저장 경로: results/{model}/{condition}[/{mode_folder}][/effort_x]
     # 예) results/gpt-4o/vanilla/prefixstep_cur/
-    sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording)
+    sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording, truncate_log)
     base_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition_folder, sub) if sub \
         else os.path.join(BASE_RESULTS_DIR, model_name, condition_folder)
     variant = variant_folder(effort, thinking, temperature)
     save_dir = os.path.join(base_dir, variant) if variant else base_dir
+    if tag:
+        # 같은 조건을 다시 돌릴 때 기존 결과와 섞이지 않도록 하위 폴더를 하나 더 둠 (예: everystep/rerun)
+        save_dir = os.path.join(save_dir, tag)
     if thinking != "default" or temperature is not None:
         print(f"   -> thinking={thinking}, temperature={temperature if temperature is not None else 'default'}")
 
@@ -442,7 +457,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     scenario_groups = list(df_target.groupby('scenario_id'))
     expected_counts = {sc_id: len(gdf) for sc_id, gdf in scenario_groups}
 
-    units = build_work_units(scenario_groups, mode)
+    units = build_work_units(scenario_groups, mode, truncate_log=truncate_log)
     print(f"🧮 시나리오 {len(scenario_groups)}개, 피험자당 API 호출 {len(units)}회 "
           f"(총 최대 {len(units) * num_subjects}회)")
 
@@ -450,7 +465,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     # 🔎 Preview: API 호출 없이 프롬프트만 확인
     # -------------------------------------------------------------------------
     if preview:
-        if mode == "prefixstep":
+        if mode in PER_STEP_MODES:
             sc0 = units[0][1]
             sc_units = [u for u in units if u[1] == sc0]
             show = [sc_units[0]] + ([sc_units[-1]] if len(sc_units) > 1 else [])
@@ -460,7 +475,9 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
             order = resolve_belief_order(belief_order, 1, sc_id, t_cut, order_seed)
             probes = sample_probes(df_input, 1, order_seed) if mode == "control" else None
             sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
-                                                               control_probes=probes, **prompt_kwargs)
+                                                               control_probes=probes,
+                                                               target_step=t_cut if mode == "singlestep" else None,
+                                                               **prompt_kwargs)
             print("=" * 70)
             print(f"[Preview] scenario {sc_id}" + (f", t = {t_cut}" if t_cut else "")
                   + (f", belief order = {order}" if current_belief else "")
@@ -480,7 +497,9 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
         # control: 피험자마다 다른 시점을 묻도록 probe를 (seed, subject, scenario)로 추출
         probes = sample_probes(df_input, subject_idx, order_seed) if mode == "control" else None
         sys_prompt, user_prompt = generate_scenario_prompt(df_input, condition, mode, belief_order=order,
-                                                           control_probes=probes, **prompt_kwargs)
+                                                           control_probes=probes,
+                                                           target_step=t_cut if mode == "singlestep" else None,
+                                                           **prompt_kwargs)
         return sys_prompt, user_prompt, order, probes
 
     def to_rows(response, unit, order, probes):
@@ -581,8 +600,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True, help="gpt-4o, gemini-2.5-flash etc.")
     parser.add_argument("--condition", type=str, default="vanilla", choices=["vanilla", "reasoning", "oneshot"], help="Experiment condition")
     parser.add_argument("--mode", type=str, default="normal",
-                        choices=["normal", "everystep", "prefixstep", "reverse", "control"],
-                        help="normal(End-step) / everystep / prefixstep(t마다 로그를 잘라 End-step 질문) / reverse / control")
+                        choices=["normal", "everystep", "prefixstep", "singlestep", "reverse", "control"],
+                        help="normal(End-step) / everystep / prefixstep(t마다 로그를 잘라 End-step 질문) / "
+                             "singlestep(Every-step-single: 전체 로그, t마다 그 시점 하나만 질문) / reverse / control")
     parser.add_argument("--subjects", type=int, default=16, help="Number of virtual subjects")
     parser.add_argument("--effort", type=str, default=None, choices=["none", "low", "medium", "high", "max"],
                         help="Reasoning effort level. Claude는 output_config.effort로 전달 ('none'은 thinking off로 처리)")
@@ -612,6 +632,11 @@ if __name__ == "__main__":
     parser.add_argument("--preview", action="store_true", help="API 호출 없이 생성될 프롬프트만 출력")
     parser.add_argument("--batch", action="store_true",
                         help="Batch API로 실행 (Claude / OpenAI / Gemini, 50%% 할인, 요청마다 독립 처리). 중단 후 같은 명령으로 재개")
+    parser.add_argument("--truncate_log", action="store_true",
+                        help="singlestep 전용: 질문 문구는 그대로 두고 로그만 1..t로 자름 (폴더 singlestep_trunc). "
+                             "singlestep과 비교하면 정보 접근 효과만 분리됨")
+    parser.add_argument("--tag", type=str, default="",
+                        help="결과 폴더 끝에 붙일 하위 폴더 (예: rerun -> .../everystep/rerun). 기존 결과와 분리할 때 사용")
     parser.add_argument("--workers", type=int, default=1,
                         help="단건 호출을 동시에 보낼 개수 (Batch가 없는 DeepSeek 등). 기본 1 = 순차 호출")
     parser.add_argument("--batch_poll", type=int, default=60, help="Batch 상태 확인 간격(초)")
@@ -619,11 +644,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.current_belief and args.mode not in STEPWISE_MODES:
-        parser.error("--current_belief는 --mode everystep 또는 prefixstep에서만 사용할 수 있습니다.")
+        parser.error("--current_belief는 --mode everystep / prefixstep / singlestep에서만 사용할 수 있습니다.")
     if args.new_wording and args.mode not in STEPWISE_MODES:
-        parser.error("--new_wording은 everystep / prefixstep에서만 사용할 수 있습니다 (End-step 문구는 바꾸지 않음).")
+        parser.error("--new_wording은 everystep / prefixstep / singlestep에서만 사용할 수 있습니다 (End-step 문구는 바꾸지 않음).")
     if args.mask_hidden and args.mode not in STEPWISE_MODES + ("normal",):
-        parser.error("--mask_hidden은 normal / everystep / prefixstep에서만 사용할 수 있습니다.")
+        parser.error("--mask_hidden은 normal / everystep / prefixstep / singlestep에서만 사용할 수 있습니다.")
     if args.mask_hidden and args.mode == "normal":
         # normal은 하위 폴더가 없어 End-step 결과를 덮어쓸 수 있으므로 막아둠
         parser.error("--mask_hidden + normal은 결과 폴더가 End-step과 겹칩니다. prefixstep의 마지막 스텝을 사용하세요.")
@@ -639,6 +664,8 @@ if __name__ == "__main__":
     if args.batch and provider_of(args.model) not in BATCH_PROVIDERS:
         parser.error(f"--batch는 Claude / OpenAI / Gemini 모델에서만 지원됩니다 ({args.model}). "
                      "대신 --workers 8 처럼 병렬 호출을 사용하세요.")
+    if args.truncate_log and args.mode != "singlestep":
+        parser.error("--truncate_log는 --mode singlestep에서만 사용합니다 (prefixstep은 이미 로그를 자름).")
     if args.batch and args.workers > 1:
         parser.error("--batch와 --workers는 함께 쓸 수 없습니다.")
     if args.thinking != "default" and not is_claude:
@@ -654,4 +681,5 @@ if __name__ == "__main__":
                    belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
                    legacy_wording=not args.new_wording, order_seed=args.order_seed,
                    thinking=args.thinking, temperature=args.temperature,
-                   batch=args.batch, batch_poll=args.batch_poll, workers=args.workers)
+                   batch=args.batch, batch_poll=args.batch_poll, workers=args.workers, tag=args.tag,
+                   truncate_log=args.truncate_log)

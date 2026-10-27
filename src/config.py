@@ -24,13 +24,16 @@ STIMULI_MAT_PATH = "data/stimuli.mat"
 # phase labeling, valid_only 구축 등 everystep 파이프라인을 그대로 공유함.
 #   - everystep : 전체 궤적을 한 번에 주고 매 스텝 응답을 받음 (기존)
 #   - prefixstep: t마다 독립 호출, 로그를 1..t로 잘라서 End-step 질문을 그대로 던짐
-STEPWISE_MODES = ("everystep", "prefixstep")
+#   - singlestep: Every-step-single. t마다 독립 호출, 로그는 전체, Every-step 질문을 시점 t 하나에 대해서만 물음
+STEPWISE_MODES = ("everystep", "prefixstep", "singlestep")
+# 작업 단위가 (scenario, t)인 mode (호출 1회 = 시점 하나)
+PER_STEP_MODES = ("prefixstep", "singlestep")
 
 # 결과를 하위 폴더에 따로 저장하는 mode (normal은 condition 폴더 바로 아래)
-SUBFOLDER_MODES = ("everystep", "prefixstep", "reverse", "control")
+SUBFOLDER_MODES = ("everystep", "prefixstep", "singlestep", "reverse", "control")
 
 
-def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True):
+def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True, truncate_log=False):
     """
     실험 변형까지 반영한 하위 폴더 이름을 반환함. 논문과 같은 문구(legacy)가 기본.
       everystep                      -> 'everystep'        (논문 Every-step 결과 폴더)
@@ -44,6 +47,8 @@ def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=Tr
         return ""
     name = mode
     # 실험용 새 문구('only given the information up to step t')만 별도 폴더로
+    if mode == "singlestep" and truncate_log:
+        name += "_trunc"   # 같은 질문 문구, 로그만 1..t로 자름 (정보 접근만 다른 대조 조건)
     if mode in STEPWISE_MODES and not legacy_wording:
         name += "_upto"
     if mask_hidden:

@@ -59,7 +59,7 @@ def fill_subject_csv(path, subj, responses, stepwise_prefix, dry_run=False):
     df["internal_thinking"] = df["internal_thinking"].astype(object)
     df["stop_reason"] = df["stop_reason"].astype(object)
 
-    # 한 응답 = 한 작업 단위: prefixstep은 (scenario, time_step), 나머지는 scenario
+    # 한 응답 = 한 작업 단위: prefixstep / singlestep은 (scenario, time_step), 나머지는 scenario
     if stepwise_prefix:
         keys = [(int(r.scenario_id), int(r.time_step) if pd.notna(r.time_step) else None) for r in df.itertuples()]
     else:
@@ -99,7 +99,7 @@ def main():
         sys.exit(f"{state_path}가 없습니다. --batch로 실행한 결과 폴더인지 확인하세요.")
     state = json.load(open(state_path))
     responses = collect(state)
-    prefix = os.path.basename(os.path.normpath(args.dir)).startswith("prefixstep") or \
+    prefix = os.path.basename(os.path.normpath(args.dir)).startswith(("prefixstep", "singlestep")) or \
         any(t is not None for (_, _, t) in responses)
 
     total = 0
