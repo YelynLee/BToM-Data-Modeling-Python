@@ -129,7 +129,7 @@ if __name__ == "__main__":
                         choices=["vanilla", "reasoning", "oneshot"],
                         help="Experiment condition")
     parser.add_argument("--mode", type=str, default="normal", 
-                        choices=["normal", "everystep", "prefixstep"], 
+                        choices=["normal", "everystep", "prefixstep", "singlestep"], 
                         help="Experiment option")
     parser.add_argument("--current_belief", action="store_true", help="current_belief 실험 결과(*_cur) 분석")
     parser.add_argument("--mask_hidden", action="store_true", help="mask_hidden 실험 결과(*_mask) 분석")

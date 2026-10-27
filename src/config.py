@@ -24,10 +24,13 @@ STIMULI_MAT_PATH = "data/stimuli.mat"
 # phase labeling, valid_only 구축 등 everystep 파이프라인을 그대로 공유함.
 #   - everystep : 전체 궤적을 한 번에 주고 매 스텝 응답을 받음 (기존)
 #   - prefixstep: t마다 독립 호출, 로그를 1..t로 잘라서 End-step 질문을 그대로 던짐
-STEPWISE_MODES = ("everystep", "prefixstep")
+#   - singlestep: Every-step-single. t마다 독립 호출, 로그는 전체, Every-step 질문을 시점 t 하나에 대해서만 물음
+STEPWISE_MODES = ("everystep", "prefixstep", "singlestep")
+# 작업 단위가 (scenario, t)인 mode (호출 1회 = 시점 하나)
+PER_STEP_MODES = ("prefixstep", "singlestep")
 
 # 결과를 하위 폴더에 따로 저장하는 mode (normal은 condition 폴더 바로 아래)
-SUBFOLDER_MODES = ("everystep", "prefixstep", "reverse", "control")
+SUBFOLDER_MODES = ("everystep", "prefixstep", "singlestep", "reverse", "control")
 
 
 def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True):

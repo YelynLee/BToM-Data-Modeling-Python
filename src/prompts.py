@@ -43,6 +43,13 @@ The logs provided represent the decision-making process of different students on
 Please provide the response in JSON format. Do not include any markdown formatting like ```json.
 """
 
+# Every-step-single(singlestep): Every-step과 같은 전체 로그·규칙에서 '한 시점(t)'만 답함.
+# 규칙 5(모든 스텝 출력)만 '요청한 스텝 하나만 출력'으로 바꾸고 나머지는 SYSTEM_PROMPT_EVERY와 동일.
+SYSTEM_PROMPT_SINGLE = SYSTEM_PROMPT_EVERY.replace(
+    """5. NO LAZINESS (CRITICAL): You must output data for EVERY SINGLE time step present in the log. Do NOT skip, abbreviate, or use placeholders like "...".""",
+    """5. TARGET STEP ONLY: You will be asked about ONE target time step. Output data ONLY for that time step.""")
+assert SYSTEM_PROMPT_SINGLE != SYSTEM_PROMPT_EVERY
+
 # =========================================================================
 # 🌟 [NEW] 역방향 추론용 System Prompt
 # =========================================================================
@@ -187,8 +194,21 @@ def _belief_texts(mode, options_str, t_last, legacy_wording):
       - normal / prefixstep : End-step 질문 그대로 ("At the FIRST time step, ... at t=1.")
                               prefixstep은 로그가 1..t로 잘려 있으므로 질문을 바꾸지 않아도 됨
       - everystep           : 논문 Every-step 질문 그대로 ("At EVERY time step, ... only given the current information.")
+      - singlestep          : Every-step 질문에서 'EVERY time step'만 'Time Step {t}'로 바꿈 (t_last = 목표 스텝)
     legacy_wording=False (--new_wording): 정보 범위를 'up to step t'로 명시한 실험용 문구
     """
+    if mode == 'singlestep':
+        if legacy_wording:
+            initial = (f"At Time Step {t_last}, rate the student's likelihood for {options_str} "
+                       f"being in the occluded spot at t=1 only given the current information.")
+            now = (f"At Time Step {t_last}, rate the student's likelihood for {options_str} "
+                   f"being in Spot 2 only given the current information.")
+            return initial, now, None, None
+        initial = (f"At Time Step {t_last}, rate the student's likelihood for {options_str} "
+                   f"being in the occluded spot at t=1, only given the information up to step {t_last}.")
+        now = (f"At Time Step {t_last}, rate the student's likelihood for {options_str} "
+               f"being in Spot 2 at t={t_last}, only given the information up to step {t_last}.")
+        return initial, now, 1, t_last
     if legacy_wording:
         if mode in ('normal', 'prefixstep'):
             initial = (f"At the FIRST time step, rate the student's likelihood for {options_str} "
@@ -255,7 +275,7 @@ def _build_belief_block(initial_text, now_text, json_fields, current_belief, bel
 
 def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
                              current_belief=False, belief_order='initial_first',
-                             mask_hidden=False, legacy_wording=True, control_probes=None):
+                             mask_hidden=False, legacy_wording=True, control_probes=None, target_step=None):
     """
     Args:
         df_scenario: 시나리오 데이터프레임.
@@ -263,6 +283,8 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
         condition: 'vanilla', 'reasoning', 'oneshot'
         mode: 'normal', 'everystep', 'prefixstep', 'reverse', 'control'
             - prefixstep: 잘린 로그에 End-step(normal)과 동일한 질문을 던짐.
+            - singlestep (Every-step-single): 전체 로그 + Every-step 질문을 target_step 하나에 대해서만 물음.
+        target_step: mode='singlestep'에서 답할 시점 t.
         current_belief: True면 initial belief(t=1)와 함께 에이전트의 '현재' belief를 따로 물음.
             JSON 키가 'belief_initial_scores' / 'belief_now_scores'로 나뉨.
         belief_order: 'initial_first' | 'now_first' (두 belief 질문의 제시 순서).
@@ -275,8 +297,13 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
     Returns:
         system_prompt, user_prompt
     """
-    if current_belief and mode not in ('normal', 'everystep', 'prefixstep'):
-        raise ValueError("current_belief는 normal / everystep / prefixstep에서만 지원됩니다.")
+    if current_belief and mode not in ('normal', 'everystep', 'prefixstep', 'singlestep'):
+        raise ValueError("current_belief는 normal / everystep / prefixstep / singlestep에서만 지원됩니다.")
+    if mode == 'singlestep':
+        if target_step is None:
+            raise ValueError("singlestep에는 target_step(t)이 필요합니다.")
+        if condition == 'oneshot':
+            raise ValueError("singlestep은 oneshot 예시를 지원하지 않습니다 (Every-step 예시는 모든 스텝 형식).")
     # 🌟 [추가] 시나리오의 전체 타임스텝 수 계산
     max_steps = int(df_scenario['time_step'].max())
     row0 = df_scenario.iloc[0]
@@ -509,6 +536,42 @@ def generate_scenario_prompt(df_scenario, condition='vanilla', mode='normal',
         """
         prompt_content = f"{prefix}\n{step_instruction}"
             
+    # [1-1] Mode: Singlestep (Every-step-single) — 전체 로그, 목표 스텝 하나만 응답
+    elif mode == 'singlestep':
+        t = int(target_step)
+        system_prompt = SYSTEM_PROMPT_SINGLE
+        init_txt, now_txt, init_ts, now_ts = _belief_texts('singlestep', options_str, t, legacy_wording)
+        belief_questions, belief_json = _build_belief_block(
+            init_txt, now_txt, json_fields, current_belief, belief_order,
+            initial_ts=init_ts, now_ts=now_ts, json_indent=12, keep_legacy_json=legacy_wording)
+
+        prompt_content = f"""
+        # [TARGET SCENARIO START]
+        # Now, please analyze tne scenario provided below.
+
+        {static_info}
+
+        [Chronological Log]
+        {dynamic_logs}
+
+        Based on the chronological situation above, please perform the following tasks:
+
+        [CRITICAL REQUIREMENT]
+        This log has {max_steps} time steps. Answer ONLY for Time Step {t}.
+
+        1. At Time Step {t}, rate the student's preference for Truck K, L, and M.
+            (Scale: 1 = Dislike strongly to 7 = Like strongly)
+
+        {belief_questions}
+
+        Return the result in the following JSON structure:
+        {{
+            "time_step": {t},
+            "desire_scores": {{ "K": int, "L": int, "M": int }},
+            {belief_json}
+        }}
+        """
+
     # [2] Mode: Normal (기존 방식 - 마지막 스텝만 분석)
     #     Prefixstep도 여기로 옴: 로그가 1..t로 잘려 있을 뿐 질문은 End-step과 동일
     else:

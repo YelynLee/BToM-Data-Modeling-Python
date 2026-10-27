@@ -132,6 +132,13 @@ python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenario_i
 python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenarios goback --subjects 5 --thinking off --batch
 python main_experiment.py --model claude-opus-4-6 --mode prefixstep --scenarios rational --subjects 5 --thinking off --batch  # 73개로 확장
 
+# 2x2 (로그 전체/잘림 x 호출당 판단 하나/여러 개): Every-step-single, 같은 시점에 Every-step 재실행(토큰 기록)
+python main_experiment.py --model claude-opus-4-6 --mode singlestep --scenarios all --subjects 5 --batch
+python main_experiment.py --model claude-opus-4-6 --mode everystep --scenarios all --subjects 5 --batch --tag rerun
+# 마지막 스텝 비교 / 토큰 요약
+python analysis/final_step_compare.py --model claude-opus-4-6 --input <everystep> <singlestep> <prefixstep> --labels ... --out <csv>
+python analysis/token_summary.py --input <everystep/rerun> <singlestep> <prefixstep> --labels ... --out <csv>
+
 # 후처리 / 분석
 python src/data_processor.py --model claude-opus-4-6 --condition vanilla --mode prefixstep
 python analysis/compare_stepwise_bootstrap.py --input <everystep_valid_only.csv> <prefixstep 폴더> --labels "Every-step" "Prefix-step" --groups 1,4 --out_dir <출력 폴더>
@@ -139,6 +146,8 @@ python analysis/compare_stepwise_bootstrap.py --input <everystep_valid_only.csv>
 
 | Argument (main_experiment.py) | Description |
 | :--- | :--- |
+| `--mode singlestep` | Every-step-single: (scenario, t)마다 독립 호출, 로그는 전체, Every-step 질문을 시점 t 하나에만 물음 (정보는 Every-step과 같고 형식은 Prefix-step과 같음) |
+| `--tag NAME` | 결과 폴더 끝에 하위 폴더 추가 (예: `--mode everystep --tag rerun` -> `everystep/rerun`), 기존 결과와 분리 |
 | `--mode prefixstep` | (scenario, t)마다 독립 API 호출. 로그는 Time Step 1..t, Map Configuration은 전체 공개. 질문은 End-step과 동일 |
 | `--scenarios` | `all`(78) / `rational`(irrational 제외 73, 논문 분석 범위) / `check`(55) / `goback`(Check-GoBack 22) |
 | `--scenario_ids 1,6,40` | 지정한 시나리오만 (`--scenarios`보다 우선) |
