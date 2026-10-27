@@ -30,7 +30,7 @@ RAW_JSON_MODES = ("reverse", "control")
 # =========================================================================
 # 작업 단위(Work unit) 구성
 # =========================================================================
-def build_work_units(scenario_groups, mode):
+def build_work_units(scenario_groups, mode, truncate_log=False):
     """
     API 호출 1회에 해당하는 작업 단위 목록을 만듦.
       - prefixstep: (scenario_id, t) 마다 1회. 로그는 1..t로 잘림.
@@ -44,7 +44,8 @@ def build_work_units(scenario_groups, mode):
         if mode in PER_STEP_MODES:
             gdf = gdf.sort_values('time_step')
             for t_cut in gdf['time_step'].astype(int).tolist():
-                df_in = gdf[gdf['time_step'] <= t_cut] if mode == "prefixstep" else gdf
+                cut = mode == "prefixstep" or truncate_log
+                df_in = gdf[gdf['time_step'] <= t_cut] if cut else gdf
                 units.append(((sc_id, t_cut), sc_id, t_cut, df_in))
         else:
             units.append(((sc_id, None), sc_id, None, gdf))
@@ -407,7 +408,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
                    scenarios="all", scenario_ids=None, current_belief=False,
                    belief_order="random", mask_hidden=False, preview=False,
                    legacy_wording=True, order_seed=0, thinking="default", temperature=None,
-                   batch=False, batch_poll=60, workers=1, tag=""):
+                   batch=False, batch_poll=60, workers=1, tag="", truncate_log=False):
     # effort 값이 있을 경우 로그에 표시
     effort_log = f", Effort=[{effort}]" if effort else ""
 
@@ -426,7 +427,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
 
     # 저장 경로: results/{model}/{condition}[/{mode_folder}][/effort_x]
     # 예) results/gpt-4o/vanilla/prefixstep_cur/
-    sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording)
+    sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording, truncate_log)
     base_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition_folder, sub) if sub \
         else os.path.join(BASE_RESULTS_DIR, model_name, condition_folder)
     variant = variant_folder(effort, thinking, temperature)
@@ -456,7 +457,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     scenario_groups = list(df_target.groupby('scenario_id'))
     expected_counts = {sc_id: len(gdf) for sc_id, gdf in scenario_groups}
 
-    units = build_work_units(scenario_groups, mode)
+    units = build_work_units(scenario_groups, mode, truncate_log=truncate_log)
     print(f"🧮 시나리오 {len(scenario_groups)}개, 피험자당 API 호출 {len(units)}회 "
           f"(총 최대 {len(units) * num_subjects}회)")
 
@@ -631,6 +632,9 @@ if __name__ == "__main__":
     parser.add_argument("--preview", action="store_true", help="API 호출 없이 생성될 프롬프트만 출력")
     parser.add_argument("--batch", action="store_true",
                         help="Batch API로 실행 (Claude / OpenAI / Gemini, 50%% 할인, 요청마다 독립 처리). 중단 후 같은 명령으로 재개")
+    parser.add_argument("--truncate_log", action="store_true",
+                        help="singlestep 전용: 질문 문구는 그대로 두고 로그만 1..t로 자름 (폴더 singlestep_trunc). "
+                             "singlestep과 비교하면 정보 접근 효과만 분리됨")
     parser.add_argument("--tag", type=str, default="",
                         help="결과 폴더 끝에 붙일 하위 폴더 (예: rerun -> .../everystep/rerun). 기존 결과와 분리할 때 사용")
     parser.add_argument("--workers", type=int, default=1,
@@ -660,6 +664,8 @@ if __name__ == "__main__":
     if args.batch and provider_of(args.model) not in BATCH_PROVIDERS:
         parser.error(f"--batch는 Claude / OpenAI / Gemini 모델에서만 지원됩니다 ({args.model}). "
                      "대신 --workers 8 처럼 병렬 호출을 사용하세요.")
+    if args.truncate_log and args.mode != "singlestep":
+        parser.error("--truncate_log는 --mode singlestep에서만 사용합니다 (prefixstep은 이미 로그를 자름).")
     if args.batch and args.workers > 1:
         parser.error("--batch와 --workers는 함께 쓸 수 없습니다.")
     if args.thinking != "default" and not is_claude:
@@ -675,4 +681,5 @@ if __name__ == "__main__":
                    belief_order=args.belief_order, mask_hidden=args.mask_hidden, preview=args.preview,
                    legacy_wording=not args.new_wording, order_seed=args.order_seed,
                    thinking=args.thinking, temperature=args.temperature,
-                   batch=args.batch, batch_poll=args.batch_poll, workers=args.workers, tag=args.tag)
+                   batch=args.batch, batch_poll=args.batch_poll, workers=args.workers, tag=args.tag,
+                   truncate_log=args.truncate_log)

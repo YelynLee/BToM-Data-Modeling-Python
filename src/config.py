@@ -33,7 +33,7 @@ PER_STEP_MODES = ("prefixstep", "singlestep")
 SUBFOLDER_MODES = ("everystep", "prefixstep", "singlestep", "reverse", "control")
 
 
-def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True):
+def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=True, truncate_log=False):
     """
     실험 변형까지 반영한 하위 폴더 이름을 반환함. 논문과 같은 문구(legacy)가 기본.
       everystep                      -> 'everystep'        (논문 Every-step 결과 폴더)
@@ -47,6 +47,8 @@ def mode_folder(mode, current_belief=False, mask_hidden=False, legacy_wording=Tr
         return ""
     name = mode
     # 실험용 새 문구('only given the information up to step t')만 별도 폴더로
+    if mode == "singlestep" and truncate_log:
+        name += "_trunc"   # 같은 질문 문구, 로그만 1..t로 자름 (정보 접근만 다른 대조 조건)
     if mode in STEPWISE_MODES and not legacy_wording:
         name += "_upto"
     if mask_hidden:

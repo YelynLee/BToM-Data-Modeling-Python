@@ -147,6 +147,7 @@ python analysis/compare_stepwise_bootstrap.py --input <everystep_valid_only.csv>
 | Argument (main_experiment.py) | Description |
 | :--- | :--- |
 | `--mode singlestep` | Every-step-single: (scenario, t)마다 독립 호출, 로그는 전체, Every-step 질문을 시점 t 하나에만 물음 (정보는 Every-step과 같고 형식은 Prefix-step과 같음) |
+| `--truncate_log` | singlestep 전용: 질문 문구는 그대로, 로그만 1..t로 자름 (`singlestep_trunc`). singlestep과 비교하면 정보 접근 효과만 분리 |
 | `--tag NAME` | 결과 폴더 끝에 하위 폴더 추가 (예: `--mode everystep --tag rerun` -> `everystep/rerun`), 기존 결과와 분리 |
 | `--mode prefixstep` | (scenario, t)마다 독립 API 호출. 로그는 Time Step 1..t, Map Configuration은 전체 공개. 질문은 End-step과 동일 |
 | `--scenarios` | `all`(78) / `rational`(irrational 제외 73, 논문 분석 범위) / `check`(55) / `goback`(Check-GoBack 22) |
