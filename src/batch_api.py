@@ -172,3 +172,19 @@ def results(job):
         return
 
     raise ValueError(p)
+
+
+# =========================================================================
+# 취소 (진행 중인 batch를 멈춤. 이미 끝난 요청의 결과는 남고 비용도 그만큼만 청구됨)
+# =========================================================================
+def cancel(job):
+    ac = _clients()
+    p = job.get("provider", "claude")
+    if p == "claude":
+        return ac.client_claude.messages.batches.cancel(job["id"]).processing_status
+    if p in ("openai_responses", "openai_chat"):
+        return ac.client_gpt.batches.cancel(job["id"]).status
+    if p == "gemini":
+        ac.client_gemini_genai.batches.cancel(name=job["id"])
+        return "cancel requested"
+    raise ValueError(p)
