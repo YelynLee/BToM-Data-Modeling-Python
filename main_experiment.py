@@ -361,6 +361,30 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
 # =========================================================================
 # 메인 실험 루프
 # =========================================================================
+def check_setting_consistency(save_dir, model_name, effort, thinking, temperature):
+    """
+    이어서 실행할 폴더에 다른 thinking 설정으로 받은 결과가 있으면 멈춤 (설정이 섞인 결과 방지).
+    Claude만 점검 (thinking_setting 기록이 있는 CSV만 대상).
+    """
+    if "claude" not in model_name:
+        return
+    import glob
+    from src.api_client import build_claude_params
+    want = build_claude_params(model_name, "", "", effort, thinking, temperature)[1]["thinking_setting"]
+    found = set()
+    for f in glob.glob(os.path.join(save_dir, "subject_*.csv")):
+        try:
+            col = pd.read_csv(f, usecols=lambda c: c == "thinking_setting")
+        except Exception:
+            continue
+        if "thinking_setting" in col:
+            found |= set(col["thinking_setting"].dropna().astype(str))
+    other = found - {want}
+    if other:
+        raise SystemExit(f"❌ {save_dir}에 다른 thinking 설정의 결과가 있습니다 ({sorted(other)} vs 지금 {want}). "
+                         f"폴더를 옮기거나 --tag로 다른 폴더를 지정하세요.")
+
+
 def run_parallel(model_name, units, num_subjects, load_subject, prepare_call, to_rows,
                  effort, thinking, temperature, workers):
     """
@@ -430,6 +454,10 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
     sub = mode_folder(mode, current_belief, mask_hidden, legacy_wording, truncate_log)
     base_dir = os.path.join(BASE_RESULTS_DIR, model_name, condition_folder, sub) if sub \
         else os.path.join(BASE_RESULTS_DIR, model_name, condition_folder)
+    if "claude-opus" in model_name and thinking == "default":
+        # Opus 기본 = thinking off. 기존 --thinking off 결과와 같은 폴더(thinking_off)를 씀.
+        # (2026-10-28 이전 'default' 실행은 adaptive thinking이었고 하위 폴더 없이 저장되어 있음)
+        thinking = "off"
     variant = variant_folder(effort, thinking, temperature)
     save_dir = os.path.join(base_dir, variant) if variant else base_dir
     if tag:
@@ -488,6 +516,7 @@ def run_experiment(model_name, condition, mode, num_subjects=16, effort=None, ve
         return
 
     os.makedirs(save_dir, exist_ok=True)
+    check_setting_consistency(save_dir, model_name, effort, thinking, temperature)
     print(f"📂 결과 저장 경로: {save_dir}")
 
     # 호출 1회 준비 / 응답 -> 행 변환 (단건 호출과 Batch가 같은 코드를 사용)
@@ -607,7 +636,8 @@ if __name__ == "__main__":
     parser.add_argument("--effort", type=str, default=None, choices=["none", "low", "medium", "high", "max"],
                         help="Reasoning effort level. Claude는 output_config.effort로 전달 ('none'은 thinking off로 처리)")
     parser.add_argument("--thinking", type=str, default="default", choices=["default", "on", "off"],
-                        help="Claude thinking. default: 기존 실험과 동일(Opus adaptive / Sonnet 없음), on: adaptive, off: disabled")
+                        help="Claude thinking. default: 추론 기능 끔(Opus = off, 결과 폴더 thinking_off / Sonnet은 thinking 파라미터 없음), "
+             "on: adaptive thinking(별도 옵션, 폴더 thinking_on), off: disabled")
     parser.add_argument("--temperature", type=float, default=None,
                         help="sampling temperature (기본: 기존 값 0.7, thinking 사용 시 1.0 고정). 예: thinking off에서 1.0으로 맞출 때 --temperature 1.0")
     parser.add_argument("--version", type=str, default="", help="Condition 폴더명 뒤에 붙일 버전 (예: 2 -> vanilla2)")
@@ -670,7 +700,7 @@ if __name__ == "__main__":
         parser.error("--batch와 --workers는 함께 쓸 수 없습니다.")
     if args.thinking != "default" and not is_claude:
         parser.error("--thinking은 현재 Claude 모델에만 적용됩니다. 다른 모델은 --effort로 추론량을 조절하세요.")
-    thinking_used = args.thinking == "on" or (args.thinking == "default" and "claude-opus" in args.model)
+    thinking_used = args.thinking == "on"
     if thinking_used and args.temperature is not None and args.temperature != 1.0:
         parser.error("thinking을 사용할 때 temperature는 1.0만 가능합니다. (--thinking off와 함께 지정하세요)")
 

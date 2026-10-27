@@ -52,10 +52,12 @@ def build_claude_params(model_name, system_prompt, user_prompt, effort=None, thi
     Claude Messages API 요청 파라미터와 기록용 메타 정보를 만듦 (일반 호출과 Batch 공통).
 
     thinking:
-      - "default": 기존 실험과 동일한 요청 (논문 결과 재현용)
-                   Opus   -> adaptive thinking, temperature 1.0, max_tokens 16000
-                   Sonnet -> thinking 없음, temperature TEMPERATURE(0.7), max_tokens 4000
-      - "on"     : adaptive thinking. thinking을 켜면 temperature는 1.0이어야 함.
+      - "default": 모든 모델을 기본 설정(추론 기능을 따로 켜지 않음)으로 시작한다는 원칙에 따름
+                   Opus   -> "off"와 같음 (thinking disabled, temperature 0.7, max_tokens 8000)
+                   Sonnet -> thinking 파라미터 없음, temperature TEMPERATURE(0.7), max_tokens 4000
+                   ※ 2026-10-28 이전 코드에서 Opus default는 adaptive thinking이었음
+                     (논문 End-step / Every-step Opus 결과와 그 이전 'default' 실행은 adaptive thinking)
+      - "on"     : adaptive thinking (별도 옵션). thinking을 켜면 temperature는 1.0이어야 함.
       - "off"    : thinking={"type": "disabled"} 로 명시적으로 끔.
     effort: output_config.effort ("low" / "medium" / "high" / "max").
     temperature: None이면 위 기본값. thinking off에서 1.0으로 맞추고 싶을 때 지정.
@@ -64,7 +66,9 @@ def build_claude_params(model_name, system_prompt, user_prompt, effort=None, thi
       params의 output_config는 그대로 두며, 일반 호출에서는 SDK 호환을 위해 extra_body로 옮김.
     """
     is_opus = "claude-opus" in model_name
-    use_thinking = is_opus if thinking == "default" else (thinking == "on")
+    if is_opus and thinking == "default":
+        thinking = "off"   # Opus 기본 = thinking off (결과 폴더·기록도 thinking_off로 통일)
+    use_thinking = thinking == "on"
 
     if use_thinking:
         thinking_cfg, temp, max_tokens = {"type": "adaptive"}, 1.0, 16000
@@ -86,7 +90,7 @@ def build_claude_params(model_name, system_prompt, user_prompt, effort=None, thi
         params["output_config"] = {"effort": effort}
 
     meta = {
-        "thinking_setting": thinking if thinking != "default" else ("default(adaptive)" if is_opus else "default(none)"),
+        "thinking_setting": thinking if thinking != "default" else "default(none)",
         "temperature": temp,
         "effort": effort or "",
     }

@@ -194,7 +194,8 @@ python analysis/control_eval.py --model claude-opus-4-6 --condition vanilla --va
 | Argument (main_experiment.py) | Description |
 | :--- | :--- |
 | `--mode control` | 문항 정의·정답·채점은 `src/control_items.py`. probe 시점과 보기 순서는 (seed, subject, scenario)로 고정되어 CSV에 저장 |
-| `--thinking` | `default`(기존과 동일: Opus adaptive / Sonnet 없음) / `on`(adaptive) / `off`(disabled). 현재 Claude만 지원 |
+| `--thinking` | `default`(추론 기능 끔: Opus는 `off`와 같고 결과는 `thinking_off` 폴더 / Sonnet은 thinking 파라미터 없음) / `on`(adaptive, 별도 옵션, `thinking_on` 폴더) / `off`(disabled). 현재 Claude만 지원. ※ 2026-10-28 이전 Opus `default`는 adaptive thinking이었음: 논문 End-step·Every-step Opus 결과와 그 이전의 하위 폴더 없는 Opus 결과는 adaptive. 같은 폴더에 다른 thinking 설정 결과가 있으면 실행을 멈춤 |
+| `python -m src.cancel_batch --dir <폴더>` | 진행 중인 batch 취소 (처리된 요청만 청구, 결과는 남음) |
 | `--temperature` | 기본은 기존 값(0.7, thinking 사용 시 1.0 고정). thinking off에서 1.0으로 맞출 때 `--temperature 1.0` |
 | `--effort` | Claude에도 `output_config.effort`로 전달 (`low`/`medium`/`high`/`max`; `none`은 thinking off로 처리) |
 
