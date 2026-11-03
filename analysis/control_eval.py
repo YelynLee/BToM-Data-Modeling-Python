@@ -10,7 +10,7 @@ main_experiment.py --mode control 결과(subject_*.csv)를 읽어,
 출력 (결과 폴더 안):
   control_scored.csv   : 행(피험자 x 시나리오)별 응답, 정답, 정오, 오차, q12 해석 선택
   control_summary.csv  : 문항별 정확도 / 평균 절대오차 / q12 해석 선택 비율 (전체 + 행동 그룹별)
-  control_ci.csv       : 위 지표의 95% 시나리오 bootstrap CI (행동 그룹별 층화)
+  control_ci.csv       : 위 지표의 95% 시나리오 bootstrap CI (기본: 층화 없음, --stratified면 행동 그룹별 층화)
                          --tom_link: 시나리오별 사실 문항 정확도 vs End-step |LLM - 사람| Spearman 상관
 
 사용 예)
@@ -34,7 +34,7 @@ from src.config import BASE_RESULTS_DIR, BEHAVIOR_GROUPS
 from src.control_items import (ground_truth, score_response, upgrade_legacy_row, result_version,
                                 ITEMS, NUMERIC_ITEMS, PROBE_COLS)
 sys.path.append(os.path.join(ROOT, "analysis"))
-from stats_utils import stratified_boot_indices, percentile_ci
+from stats_utils import boot_indices, set_stratified, percentile_ci
 import numpy as np
 import pickle
 from scipy.stats import spearmanr
@@ -124,13 +124,13 @@ def summarize(scored):
 
 
 # -------------------------------------------------------------------------
-# 신뢰구간: 시나리오 단위 bootstrap (행동 그룹별 층화, 한 시나리오의 모든 피험자 행이 함께 뽑힘)
+# 신뢰구간: 시나리오 단위 bootstrap (기본 층화 없음, 한 시나리오의 모든 피험자 행이 함께 뽑힘)
 # -------------------------------------------------------------------------
 def bootstrap_cis(scored, n_boot=2000, seed=0):
     ok = scored[~scored['parse_error']].copy()
     scen = sorted(ok['scenario_id'].unique())
     group_of = ok.groupby('scenario_id')['group_id'].first().to_dict()
-    B = stratified_boot_indices(scen, group_of, n_boot, seed)
+    B = boot_indices(scen, group_of, n_boot, seed)
     pos = {s: i for i, s in enumerate(scen)}
     sidx = ok['scenario_id'].map(pos).to_numpy()
 
@@ -182,7 +182,7 @@ def tom_link(scored, model, condition, n_boot=2000, seed=0):
     acc = ok.assign(acc=np.nanmean(ok[fact_cols].to_numpy(float), axis=1)).groupby('scenario_id')['acc'].mean()
     scen = acc.index.to_numpy()
     group_of = ok.groupby('scenario_id')['group_id'].first().to_dict()
-    B = stratified_boot_indices(list(scen), group_of, n_boot, seed)
+    B = boot_indices(list(scen), group_of, n_boot, seed)
     rows = []
     if acc.nunique() < 2:
         print("[info] 시나리오별 사실 문항 정확도가 모두 같아(예: 전부 정답) ToM 오차와의 상관을 정의할 수 없습니다.")
@@ -228,7 +228,10 @@ def main():
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--tom_link", action="store_true",
                     help="시나리오별 사실 문항 정확도와 End-step ToM 오차(|LLM-사람|)의 상관도 계산")
+    ap.add_argument("--stratified", action="store_true",
+                    help="행동 그룹별 층화 bootstrap (기본: 층화 없음 = 논문 방식). 강건성 점검용")
     args = ap.parse_args()
+    set_stratified(args.stratified)
 
     input_dir = args.input or os.path.join(BASE_RESULTS_DIR, args.model, args.condition, "control", args.variant)
     df = load_results(input_dir)

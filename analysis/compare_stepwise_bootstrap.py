@@ -18,7 +18,7 @@ Stepwise 조건(everystep / prefixstep 등) 비교 + 신뢰구간 / 검정.
   4) |LLM - BToM| 평균 절대오차 (belief, 시나리오 평균 후 평균)
 
 신뢰구간
-  - 2단계 bootstrap: 시나리오를 행동 그룹별 층화 복원추출(모든 조건에 같은 리샘플) ->
+  - 2단계 bootstrap: 시나리오 복원추출(기본: 층화 없음, --stratified면 행동 그룹별 층화)(모든 조건에 같은 리샘플) ->
     각 조건 안에서 피험자를 복원추출 (피험자가 1명이면 시나리오만)
   - 첫 조건 대비 차이: 같은 시나리오 리샘플에서의 차이 분포 -> CI, bootstrap p
 검정 (첫 조건 대비)
@@ -59,7 +59,7 @@ from src.dataset import df_btom
 from src.config import get_group_indices
 from src.prepare_everystep import apply_phase_labeling, load_reference_everystep
 from analysis.plot_everystep import get_phase_index
-from stats_utils import (stratified_boot_indices, percentile_ci, boot_p_two_sided, paired_signflip_test)
+from stats_utils import (boot_indices, set_stratified, percentile_ci, boot_p_two_sided, paired_signflip_test)
 
 OPTS = {"belief": ["L", "M", "Empty"], "desire": ["K", "L", "M"]}
 # 열 순서를 명시적으로 고정: desire 3개 다음 belief 3개 (BEL 슬라이스가 이 순서에 의존)
@@ -495,7 +495,10 @@ def main():
     ap.add_argument("--title", default="Stepwise conditions vs reference models (95% bootstrap CI)")
     ap.add_argument("--phase_vpa", action="store_true",
                     help="See G2 이후 구간별 VPA를 Check 그룹(1,2,4)에서 계산해 별도 그림(stepwise_phase_vpa.png)으로 저장")
+    ap.add_argument("--stratified", action="store_true",
+                    help="행동 그룹별 층화 bootstrap (기본: 층화 없음 = 논문 방식). 강건성 점검용")
     args = ap.parse_args()
+    set_stratified(args.stratified)
     assert len(args.input) == len(args.labels), "--input과 --labels 개수가 같아야 합니다."
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -530,7 +533,7 @@ def main():
 
     # 2단계 bootstrap (시나리오 리샘플은 조건 간 공유)
     rng = np.random.default_rng(args.seed + 1)
-    B = stratified_boot_indices(eng.scen_ids, group_of, args.n_boot, args.seed)
+    B = boot_indices(eng.scen_ids, group_of, args.n_boot, args.seed)
     boots = [[] for _ in arrays]
     for ix in B:
         sw = np.bincount(ix, minlength=eng.n_s).astype(float)

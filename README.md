@@ -223,7 +223,9 @@ python analysis/compare_stepwise_bootstrap.py \
 # Control: 문항별 정확도·q12 해석 선택 비율의 CI, 시나리오별 사실 정확도 vs End-step ToM 오차 상관
 python analysis/control_eval.py --model claude-opus-4-6 --variant thinking_off --tom_link
 ```
-공통 함수(층화 시나리오 bootstrap, Williams/Steiger, sign-flip, Holm, split-half)는 `analysis/stats_utils.py`.
+공통 함수(시나리오 bootstrap, Williams/Steiger, sign-flip, Holm, split-half)는 `analysis/stats_utils.py`.
+bootstrap 기본값은 층화 없는 시나리오 복원추출(논문 Table 4와 같은 방식)이며, 모든 분석 스크립트에서 `--stratified`로 행동 그룹별 층화를 강건성 점검으로 돌릴 수 있습니다.
+`endstep_stats.py`에는 [7] Worse 그룹 레퍼런스 비교(그룹 평균·모델별, 1위와 나머지의 paired 차이)와 [8] End-step VPA(모델별 고유 R²·β·total, 예측변수 4개 = 논문 / 5개 = Hindsight 포함, 1위와 2위의 paired 차이)가 포함됩니다.
 
 참고: 원래 Map Configuration에는 격자 크기(15×5)가 없어서, 건물이 가장자리에 닿는 배치에서는 프롬프트만으로 격자 밖 우회 경로가 가능해 보입니다. control 채점은 최단거리 문항(q5, q6)을 실제 격자 기준과 경계 없는 기준 두 가지로 모두 기록합니다.
 

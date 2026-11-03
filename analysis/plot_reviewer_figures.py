@@ -37,7 +37,7 @@ for p in (ROOT, os.path.join(ROOT, "src"), os.path.join(ROOT, "analysis")):
         sys.path.append(p)
 
 from src.config import HUMAN_PKL_PATH, get_group_indices
-from stats_utils import stratified_boot_indices, percentile_ci
+from stats_utils import boot_indices, set_stratified, percentile_ci
 
 # 기준 팔레트(dataviz 기본 categorical 1, 2번) — 모델 순서대로 고정
 MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
@@ -252,7 +252,7 @@ def boot_item_ci(d, cols, n_boot=2000, seed=0):
     scen = sorted(d.scenario_id.unique())
     per = d.groupby("scenario_id")[cols].mean().reindex(scen).astype(float)
     cnt = d.groupby("scenario_id").size().reindex(scen).to_numpy(float)
-    B = stratified_boot_indices(scen, group_of, n_boot, seed)
+    B = boot_indices(scen, group_of, n_boot, seed)
     vals = per.to_numpy()
     est = np.nansum(vals * cnt[:, None], axis=0) / cnt.sum()
     boots = np.array([np.nansum(vals[b] * cnt[b, None], axis=0) / cnt[b].sum() for b in B])
@@ -323,7 +323,7 @@ def fig_c2(models, control_dirs, endstep_pkls, out, n_boot=2000):
         acc = d.groupby("scenario_id")["fact_acc"].mean()
         e = pickle.load(open(pk, "rb"))
         scen = sorted(s for s in acc.index if s in group_of)
-        B = stratified_boot_indices(scen, group_of, n_boot, 0)
+        B = boot_indices(scen, group_of, n_boot, 0)
         col = MODEL_COLORS[mi]
         for ax, (dim, key) in zip(axes, (("desire", "des_inf_mean"), ("belief", "bel_inf_mean_norm"))):
             err = np.abs(e[key] - human[key]).mean(axis=0)  # 시나리오별 옵션 평균 |LLM - 사람|
@@ -355,7 +355,10 @@ def main():
     ap.add_argument("--control", nargs="+", default=None)
     ap.add_argument("--endstep", nargs="+", default=None)
     ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--stratified", action="store_true",
+                    help="행동 그룹별 층화 bootstrap (기본: 층화 없음 = 논문 방식). 강건성 점검용")
     args = ap.parse_args()
+    set_stratified(args.stratified)
     os.makedirs(args.out_dir, exist_ok=True)
     if args.compare:
         fig_r1(args.models, args.compare, os.path.join(args.out_dir, "R1_decomposition.png"))
