@@ -67,13 +67,19 @@ def main():
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out_dir", default=os.path.join(BASE_RESULTS_DIR, "stats"))
+    ap.add_argument("--simple_bootstrap", action="store_true",
+                    help="행동 그룹 층화 없이 시나리오를 복원추출 (논문 원래 방식). 결과 파일명에 _simple")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
     ids, group_of = scenario_set(args.exclude_partial)
     cols = np.array(ids) - 1
     n_points = 3 * len(ids)
-    B = stratified_boot_indices(ids, group_of, args.n_boot, args.seed)  # (n_boot, n_scen) 위치
+    if args.simple_bootstrap:
+        # 논문 원래 방식: 그룹 구성을 고정하지 않고 73개 시나리오 전체에서 복원추출 (더 보수적인 CI)
+        B = np.random.default_rng(args.seed).integers(0, len(ids), size=(args.n_boot, len(ids)))
+    else:
+        B = stratified_boot_indices(ids, group_of, args.n_boot, args.seed)  # (n_boot, n_scen) 위치
     print(f"[info] scenarios = {len(ids)} ({'Check-Partial 제외' if args.exclude_partial else 'irrational만 제외'}), "
           f"points per dimension = {n_points}, bootstrap = {args.n_boot}")
 
@@ -188,7 +194,7 @@ def main():
 
     res = pd.DataFrame(rows)
     res.insert(0, "n_scenarios", len(ids))
-    out = os.path.join(args.out_dir, f"endstep_stats_{args.condition}{'_nopartial' if args.exclude_partial else ''}.csv")
+    out = os.path.join(args.out_dir, f"endstep_stats_{args.condition}{'_nopartial' if args.exclude_partial else ''}{'_simple' if args.simple_bootstrap else ''}.csv")
     res.to_csv(out, index=False)
     print_summary(res)
     print(f"\n✅ saved: {out}")
