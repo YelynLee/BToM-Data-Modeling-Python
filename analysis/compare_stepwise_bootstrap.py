@@ -483,6 +483,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", nargs="+", required=True)
     ap.add_argument("--labels", nargs="+", required=True)
+    ap.add_argument("--no_paired", action="store_true",
+                    help="첫 조건 대비 차이 / 순열 검정을 계산하지 않음 (입력이 서로 다른 모델일 때, 예: Every-step VPA 모델 비교)")
     ap.add_argument("--groups", default="1,2,3,4,5,6,7", help="분석할 group_id (기본: 전체 7개 그룹 = irrational 제외 73개)")
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--n_perm", type=int, default=10000)
@@ -554,7 +556,7 @@ def main():
     # 첫 조건 대비 차이
     sc0 = eng.scenario_level(aggs[0])
     perm_rows = []
-    for j in range(1, len(arrays)):
+    for j in (range(1, len(arrays)) if not args.no_paired else []):
         name = f"{args.labels[j]} - {args.labels[0]}"
         for k in point[0]:
             if k not in boots[j] or k not in boots[0]:
