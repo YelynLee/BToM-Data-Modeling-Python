@@ -7,7 +7,7 @@ t = T에서는 End-step, Every-step, Every-step-single, Prefix-step이 모두 �
 입력: 결과 폴더(subject_*.csv가 있는 곳) 또는 model_data.pkl.
   - 폴더에 model_data.pkl이 없으면 data_processor로 만들어서 사용 (stepwise는 실제 마지막 스텝 행만 사용)
   - 폴더 경로에서 mode(everystep / prefixstep / singlestep)를 찾음
-지표: 73개 시나리오(irrational 제외), 옵션 3개를 펼친 pooled Pearson r, 시나리오 층화 bootstrap 95% CI
+지표: 73개 시나리오(irrational 제외), 옵션 3개를 펼친 pooled Pearson r, 시나리오 bootstrap 95% CI (기본 층화 없음)
 
 사용 예)
   python analysis/final_step_compare.py --model claude-opus-4-6 \\
@@ -32,7 +32,7 @@ for p in (ROOT, os.path.join(ROOT, "src"), os.path.join(ROOT, "analysis")):
 
 from src.config import (BASE_RESULTS_DIR, HUMAN_PKL_PATH, REFERENCE_PKL_DIR, STEPWISE_MODES,
                         get_group_indices)
-from stats_utils import pooled_r, stratified_boot_indices, percentile_ci
+from stats_utils import pooled_r, boot_indices, set_stratified, percentile_ci
 
 KEY = {"desire": "des_inf_mean", "belief": "bel_inf_mean_norm"}
 
@@ -67,14 +67,17 @@ def main():
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="결과 csv 경로")
+    ap.add_argument("--stratified", action="store_true",
+                    help="행동 그룹별 층화 bootstrap (기본: 층화 없음 = 논문 방식). 강건성 점검용")
     args = ap.parse_args()
+    set_stratified(args.stratified)
     assert len(args.input) == len(args.labels), "--input과 --labels 개수가 같아야 합니다."
 
     groups = get_group_indices(include_irrational=False)
     group_of = {s: g for g, ids in enumerate(groups) for s in ids}
     scen = sorted(group_of)
     idx = np.array(scen) - 1
-    boot = stratified_boot_indices(scen, group_of, args.n_boot, args.seed)
+    boot = boot_indices(scen, group_of, args.n_boot, args.seed)
 
     runs = {}
     if not args.no_end:

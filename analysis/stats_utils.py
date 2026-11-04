@@ -71,6 +71,28 @@ def stratified_boot_indices(scenario_ids, group_of, n_boot=2000, seed=0):
     return out
 
 
+# 기본 리샘플 방식: 층화하지 않은 시나리오 복원추출 (논문 Table 4와 같은 방식, 더 보수적인 CI).
+# 각 스크립트의 --stratified 옵션으로 행동 그룹별 층화로 바꿀 수 있음 (강건성 점검용).
+STRATIFIED = False
+
+
+def set_stratified(flag):
+    global STRATIFIED
+    STRATIFIED = bool(flag)
+
+
+def boot_indices(scenario_ids, group_of=None, n_boot=2000, seed=0, stratified=None):
+    """
+    시나리오 bootstrap 인덱스 (n_boot, n_scen). 모든 조건에 같은 배열을 쓰면 paired bootstrap.
+      stratified=None이면 모듈 기본값(STRATIFIED, 기본 False = 층화 없음)을 따름.
+    """
+    use = STRATIFIED if stratified is None else stratified
+    if use:
+        return stratified_boot_indices(scenario_ids, group_of, n_boot, seed)
+    n = len(list(scenario_ids))
+    return np.random.default_rng(seed).integers(0, n, size=(n_boot, n))
+
+
 def indices_to_weights(idx, n):
     """리샘플 인덱스 -> 시나리오별 뽑힌 횟수."""
     return np.bincount(idx, minlength=n).astype(float)
