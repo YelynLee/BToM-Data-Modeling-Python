@@ -273,7 +273,7 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
     state = json.load(open(state_path)) if os.path.exists(state_path) else {"batches": []}
 
     def save_state():
-        with open(state_path, "w") as f:
+        with open(state_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
     unit_by_key = {u[0]: u for u in units}
