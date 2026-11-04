@@ -23,6 +23,9 @@ End-step 통계 (리뷰어 대응용). 모든 분석은 같은 시나리오 집�
               (Opus 고유 BToM desire 0.174 / belief 0.135 재현). ※ 논문 §3.3 본문은 "five models"라고 되어 있어 수정 필요
       - p5_*: Hindsight까지 5개 (belief만; desire는 Hindsight와 BToM의 상관이 ~1이라 BToM 고유분이 정의상 0에 가까워짐)
       - 모두 z-score
+[9] desire와 belief의 모델 순위 일치 (논문 App E.1의 Spearman 0.65)
+      - 모델 10개의 r(LLM, 사람) desire 순위 vs belief 순위의 Spearman ρ, 시나리오 bootstrap CI
+      - ※ CI는 시나리오 표본에 따른 불확실성만 반영 (모델이 10개뿐이라는 점은 반영하지 않음)
       - 논문은 음수를 0으로 잘랐으나(clip) 여기서는 CI를 위해 자르지 않음. 점추정은 'estimate_clipped'에 함께 기록
 
 CI: 시나리오 단위 bootstrap (기본: 층화 없음 = 논문 Table 4 방식, --stratified면 행동 그룹별 층화; 옵션 3개는 함께), 모든 지표에 같은 리샘플 사용.
@@ -132,6 +135,7 @@ def main():
             every[m] = load(p)
 
     rows = []
+    boot_llm_by_dim, est_llm_by_dim = {}, {}
 
     def add(section, name, dim, metric, est, boots=None, p=None, **extra):
         lo, hi = percentile_ci(boots) if boots is not None else (np.nan, np.nan)
@@ -166,11 +170,14 @@ def main():
         r_btom_h = pooled_r(Bt, H)
         sec4 = []
         boot_llm_h = {}
+        boot_llm_by_dim[dim] = boot_llm_h
+        est_llm_by_dim[dim] = {}
         for m, d in llm.items():
             L = mat(d, dim, cols)
             r_lh, r_lb = pooled_r(L, H), pooled_r(L, Bt)
             b_lh = boot_r(L, H)
             boot_llm_h[m] = b_lh
+            est_llm_by_dim[dim][m] = r_lh
             add("3_llm", m, dim, "r_with_human", r_lh, b_lh, group="better" if m in BETTER else "worse")
             add("3_llm", m, dim, "r_with_btom", r_lb, boot_r(L, Bt), group="better" if m in BETTER else "worse")
             diff = b_lh - boot_ref['btom']
@@ -268,6 +275,17 @@ def main():
                     dd = (bts[uq[0]] - bts[uq[1]]).to_numpy()
                     add("8_endstep_vpa", m, dim, f"{tag}_{uq[0]} - {uq[1]}", pt[uq[0]] - pt[uq[1]], dd,
                         boot_p_two_sided(dd), group="better" if m in BETTER else "worse", note="top minus 2nd")
+
+    # [9] desire / belief 모델 순위 일치
+    from scipy.stats import spearmanr
+    ms = [m for m in est_llm_by_dim.get("desire", {}) if m in est_llm_by_dim.get("belief", {})]
+    if len(ms) >= 3:
+        rho = spearmanr([est_llm_by_dim["desire"][m] for m in ms], [est_llm_by_dim["belief"][m] for m in ms])[0]
+        bd = np.array([boot_llm_by_dim["desire"][m] for m in ms])  # (n_model, n_boot)
+        bb = np.array([boot_llm_by_dim["belief"][m] for m in ms])
+        rb = np.array([spearmanr(bd[:, i], bb[:, i])[0] for i in range(bd.shape[1])])
+        add("9_rank_agreement", f"{len(ms)} models", "desire_vs_belief", "spearman(r_desire, r_belief)", rho, rb,
+            note="scenario bootstrap; does not reflect sampling of models")
 
     res = pd.DataFrame(rows)
     res.insert(0, "n_scenarios", len(ids))
