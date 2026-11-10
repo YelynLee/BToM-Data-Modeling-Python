@@ -99,7 +99,7 @@ def fig_r0(out, T=8, tq=4):
     print(f"✅ saved: {out}")
 
 
-def fig_r2(d, model, out):
+def fig_r2(d, model, out, note="five runs per condition"):
     s = pd.read_csv(os.path.join(d, "stepwise_bootstrap_summary.csv"))
     f = pd.read_csv(os.path.join(d, "final_step.csv"))
     pull = pd.read_csv(os.path.join(d, "truth_leak_index.csv"))
@@ -144,15 +144,17 @@ def fig_r2(d, model, out):
     ax[2].text(3.45, -0.47, "Prefix at t = T uses the End-step prompt\n(run-to-run reliability)", fontsize=8,
                color="gray", ha="right", va="bottom")
     gh = fb[fb.versus == "Human"].set_index("condition")
+    lines = []
     if "End-step" in gh.index:
-        v = gh.loc["End-step", "r"]
-        ax[3].axhline(v, ls="--", c=COL["Prefix-step"], lw=0.9)
-        ax[3].text(-0.45, v - 0.07, f"End-step {v:.2f}", fontsize=8, color=COL["Prefix-step"])
+        lines.append(("End-step", gh.loc["End-step", "r"], "--", COL["Prefix-step"]))
     if "BToM" in gh.index:
-        v = gh.loc["BToM", "r"]
-        ax[3].axhline(v, ls=":", c="gray", lw=0.9)
-        ax[3].text(-0.45, v + 0.03, f"BToM–human {v:.2f}", fontsize=8, color="gray")
-    fig.suptitle(f"{model}: belief ratings, five runs per condition", fontsize=11, y=1.02)
+        lines.append(("BToM–human", gh.loc["BToM", "r"], ":", "gray"))
+    lines.sort(key=lambda z: z[1])
+    for k, (lab, v, ls, c) in enumerate(lines):
+        ax[3].axhline(v, ls=ls, c=c, lw=0.9)
+        dy = -0.075 if (k == 0 and len(lines) > 1) else 0.025      # 낮은 선은 아래, 높은 선은 위에 표기
+        ax[3].text(-0.45, v + dy, f"{lab} {v:.2f}", fontsize=8, color=c)
+    fig.suptitle(f"{model}: belief ratings, {note}", fontsize=11, y=1.02)
     fig.tight_layout()
     fig.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -202,8 +204,9 @@ def fig_r3(models, dirs, out, n_boot=2000, seed=0):
         for _, r in R[(R.model == m) & (R.term != "total")].iterrows():
             if r.estimate >= 0:
                 ax.barh(i, r.estimate, left=pos, color=cc[r.term], edgecolor="white")
-                ax.text(pos + r.estimate / 2, i, f"{r.estimate:.2f}\n({r.share:.0%})", ha="center", va="center",
-                        fontsize=7.5, color="white")
+                if r.estimate >= 0.15:          # 좁은 구간은 숫자 생략 (csv에 있음)
+                    ax.text(pos + r.estimate / 2, i, f"{r.estimate:.2f}\n({r.share:.0%})", ha="center", va="center",
+                            fontsize=7.5, color="white")
                 pos += r.estimate
             else:
                 ax.barh(i, r.estimate, left=neg, color=cc[r.term], edgecolor="white", hatch="//")
@@ -226,6 +229,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--r2_dir")
     ap.add_argument("--r2_model", default="")
+    ap.add_argument("--r2_name", default="R2_opus_four_conditions.png", help="R2 출력 파일 이름")
+    ap.add_argument("--r2_note", default="five runs per condition", help="R2 제목 뒤 설명")
     ap.add_argument("--models", nargs="+")
     ap.add_argument("--compare", nargs="+")
     ap.add_argument("--out_dir", required=True)
@@ -235,7 +240,7 @@ def main():
     if a.design:
         fig_r0(os.path.join(a.out_dir, "R0_condition_design.png"))
     if a.r2_dir:
-        fig_r2(a.r2_dir, a.r2_model, os.path.join(a.out_dir, "R2_opus_four_conditions.png"))
+        fig_r2(a.r2_dir, a.r2_model, os.path.join(a.out_dir, a.r2_name), a.r2_note)
     if a.models:
         fig_r3(a.models, a.compare, os.path.join(a.out_dir, "R3_factor_decomposition.png"))
 
