@@ -64,6 +64,12 @@ def fig_r0(out, T=8, tq=4):
         for q in qs:
             ax.plot(q, y + 0.42, marker="v", ms=8, color=wc[word], clip_on=False)
         ax.text(0.2, y, name, ha="right", va="center", fontsize=10, fontweight="bold" if name in ("End-step", "Every-step", "Prefix-step") else "normal")
+        # 열 칸 중 Every-step과 다른 항목에 연회색 배경 (End-step은 기준 조건이라 제외)
+        if name not in ("End-step", "Every-step"):
+            diff = [log != "full", nj != "T (all steps)", word != "Every"]
+            for k, (x0, wd) in enumerate([(T + 0.75, 1.6), (T + 2.45, 1.85), (T + 4.45, 1.6)]):
+                if diff[k]:
+                    ax.add_patch(plt.Rectangle((x0, y - 0.3), wd, 0.6, facecolor="#e4e4e1", edgecolor="none", zorder=0))
         ax.text(T + 0.9, y, "full (1..T)" if log == "full" else "1..t", va="center", fontsize=9)
         ax.text(T + 2.6, y, nj, va="center", fontsize=9)
         ax.text(T + 4.6, y, word, va="center", fontsize=9, color=wc[word])
@@ -76,11 +82,12 @@ def fig_r0(out, T=8, tq=4):
         ax.annotate("", xy=(-2.75, b_), xytext=(-2.75, a_), arrowprops=dict(arrowstyle="<->", lw=0.8))
         ax.text(-2.85, (a_ + b_) / 2, lab, ha="right", va="center", fontsize=8.5, style="italic")
     from matplotlib.lines import Line2D
-    ax.legend(handles=[Patch(facecolor="#cfd8e3", edgecolor="#8a96a3", label="step in context"),
+    ax.legend(handles=[Patch(facecolor="#e4e4e1", edgecolor="none", label="differs from Every-step"),
+                       Patch(facecolor="#cfd8e3", edgecolor="#8a96a3", label="step in context"),
                        Patch(facecolor="white", edgecolor="#c9c9c9", ls="--", label="step not shown"),
                        Line2D([], [], marker="v", ls="", color=wc["End"], label="question, End-step wording"),
                        Line2D([], [], marker="v", ls="", color=wc["Every"], label="question, Every-step wording")],
-              loc="upper center", bbox_to_anchor=(0.45, -0.18), ncol=4, frameon=False, fontsize=8.5)
+              loc="upper center", bbox_to_anchor=(0.45, -0.18), ncol=5, frameon=False, fontsize=8.5)
     ax.set_xlim(-5.2, T + 6.6)
     ax.set_ylim(-0.6, len(rows) - 0.05)
     ax.set_yticks([])
