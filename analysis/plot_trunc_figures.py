@@ -63,7 +63,7 @@ def fig_r0(out, T=8, tq=4):
                                        edgecolor="#8a96a3" if shown else "#c9c9c9", ls="-" if shown else "--", lw=0.8))
         for q in qs:
             ax.plot(q, y + 0.42, marker="v", ms=8, color=wc[word], clip_on=False)
-        ax.text(0.2, y, name, ha="right", va="center", fontsize=10, fontweight="bold")
+        ax.text(0.2, y, name, ha="right", va="center", fontsize=10, fontweight="bold" if name in ("End-step", "Every-step", "Prefix-step") else "normal")
         ax.text(T + 0.9, y, "full (1..T)" if log == "full" else "1..t", va="center", fontsize=9)
         ax.text(T + 2.6, y, nj, va="center", fontsize=9)
         ax.text(T + 4.6, y, word, va="center", fontsize=9, color=wc[word])
