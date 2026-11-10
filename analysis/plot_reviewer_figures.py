@@ -1,8 +1,9 @@
 """
 리뷰어 응답용 그림 / 표 (모델 여러 개를 한 그림에 비교).
 
-  R1 : Every-step / Every-step-single / Prefix-step 분해 (1×3)
-       (a) hindsight 지수  (b) 마지막 스텝 belief r(사람) + End-step  (c) 판단당 생성 토큰
+  R1 : Every-step / Every-step-single / Prefix-step 분해 (1×4)
+       (a) hindsight 지수  (b) 마지막 스텝 belief r(사람) + End-step
+       (c) 마지막 스텝 belief r(같은 모델 End-step)  (d) 판단당 생성 토큰
   S1 : 주요 지표 표 (조건별 추정치 [95% CI], Every-step 대비 차이 [CI], bootstrap p, 순열 p)
   C1 : control 사실 문항별 정확도 (q12 제외), 격자 경계 해석과 무관한 기준 함께 표시
   C2 : 시나리오별 사실 정확도 vs End-step |LLM - 사람| (desire, belief), Spearman + bootstrap CI
@@ -63,7 +64,7 @@ def _offsets(n, width=0.22):
 # R1
 # =========================================================================
 def fig_r1(models, compare_dirs, out):
-    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.1))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4.1))
     offs = _offsets(len(models))
     for mi, (name, d) in enumerate(zip(models, compare_dirs)):
         col = MODEL_COLORS[mi]
@@ -94,11 +95,19 @@ def fig_r1(models, compare_dirs, out):
             axes[1].axhline(fb.loc["BToM", "r"], color=INK2, ls="--", lw=1, zorder=1)
             axes[1].text(-0.35, fb.loc["BToM", "r"] + 0.03, "BToM–human", color=INK2, fontsize=8.5, ha="left")
 
-        # (c) tokens per judgement (median, p10–p90)
+        # (c) final-step belief r(own End-step); Prefix-step at t = T uses the End-step prompt (= reliability)
+        fe = f[(f.dimension == "belief") & (f.versus == "End-step")].set_index("condition")
+        ee = [fe.loc[c, "r"] for c in CONDS]
+        axes[2].plot(x, ee, color=col, lw=1.4, alpha=0.6, zorder=2)
+        axes[2].errorbar(x, ee, yerr=[[fe.loc[c, "r"] - fe.loc[c, "ci_low"] for c in CONDS],
+                                      [fe.loc[c, "ci_high"] - fe.loc[c, "r"] for c in CONDS]],
+                         fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3)
+
+        # (d) tokens per judgement (median, p10–p90)
         tj = t[t.metric == "gen_per_judgement"].set_index("condition")
         med = [tj.loc[c, "median"] for c in CONDS]
-        axes[2].plot(x, med, color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[2].errorbar(x, med, yerr=[[m - tj.loc[c, "p10"] for m, c in zip(med, CONDS)],
+        axes[3].plot(x, med, color=col, lw=1.4, alpha=0.6, zorder=2)
+        axes[3].errorbar(x, med, yerr=[[m - tj.loc[c, "p10"] for m, c in zip(med, CONDS)],
                                        [tj.loc[c, "p90"] - m for m, c in zip(med, CONDS)]],
                          fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3)
 
@@ -117,10 +126,18 @@ def fig_r1(models, compare_dirs, out):
     ax.set_ylim(-0.3, 1.0)
     ax.set_title("(b) Final step: same information as End-step", loc="left", fontsize=11)
     ax = axes[2]
+    ax.axhline(0, color=INK2, lw=1)
+    ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
+    ax.set_ylabel("r with own End-step (belief, t = T)")
+    ax.set_ylim(-0.5, 1.0)
+    ax.set_title("(c) Final step: agreement with own End-step", loc="left", fontsize=11)
+    ax.text(2.45, -0.46, "Prefix-step at t = T = End-step prompt\n(run-to-run reliability)", color=INK2,
+            fontsize=8, ha="right", va="bottom")
+    ax = axes[3]
     ax.set_yscale("log")
     ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
     ax.set_ylabel("Generated tokens per judgement")
-    ax.set_title("(c) Compute per judgement (median, 10–90%)", loc="left", fontsize=11)
+    ax.set_title("(d) Compute per judgement (median, 10–90%)", loc="left", fontsize=11)
     for a in axes:
         _style(a)
     fig.legend(*axes[0].get_legend_handles_labels(), loc="lower center", ncol=len(models), frameon=False,
