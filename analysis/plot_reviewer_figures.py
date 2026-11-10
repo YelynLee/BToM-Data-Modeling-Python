@@ -187,9 +187,14 @@ def table_s1(models, compare_dirs, out_csv):
                 r["End-step"] = fmt(g.loc["End-step", "r"], g.loc["End-step", "ci_low"], g.loc["End-step", "ci_high"])
             rows.append(r)
     res = pd.DataFrame(rows)
-    res.to_csv(out_csv, index=False)
-    with open(os.path.splitext(out_csv)[0] + ".md", "w") as fh:
-        fh.write(res.fillna("").to_markdown(index=False) if hasattr(res, "to_markdown") else res.to_string())
+    res.to_csv(out_csv, index=False, encoding="utf-8-sig")  # Excel에서도 기호가 보이도록
+    # Windows 기본 인코딩(cp949)에서 '−', 'Δ', '²'가 깨지지 않도록 UTF-8로 저장
+    try:
+        md = res.fillna("").to_markdown(index=False)
+    except ImportError:  # tabulate 미설치
+        md = res.fillna("").to_string(index=False)
+    with open(os.path.splitext(out_csv)[0] + ".md", "w", encoding="utf-8") as fh:
+        fh.write(md)
     print(f"✅ saved: {out_csv} (+ .md)")
     return res
 
