@@ -127,3 +127,23 @@ python analysis/compare_stepwise_bootstrap.py \
 - `stepwise_bootstrap_summary.csv`의 `vpa_desire_*`, `vpa_belief_*` 행에 수치
 - `everystep_valid_only.csv`가 없으면 먼저: `python run_analysis.py --model deepseek-reasoner --mode everystep --type phase`
 - 예측변수: desire는 BToM, TrueBelief, NoCost, MotionHeuristic (Hindsight desire = BToM이라 제외), belief는 Hindsight 포함 5개. 시나리오 73개. 논문 Fig 5b는 78개로 계산되어 소수점이 다를 수 있음
+
+---
+
+## 5. Single-trunc 포함 네 조건 (Opus) 과 그림 R0, R2, R3
+
+```bash
+R=results/claude-opus-4-6/vanilla; O=$R/compare_4cond
+IN="$R/everystep/thinking_off/rerun $R/singlestep/thinking_off $R/singlestep_trunc/thinking_off $R/prefixstep/thinking_off"
+LAB=("Every-step" "Every-step-single" "Single-trunc" "Prefix-step")
+python analysis/compare_stepwise_bootstrap.py --input $IN --labels "${LAB[@]}" --out_dir $O
+python analysis/final_step_compare.py --model claude-opus-4-6 --input $IN --labels "${LAB[@]}" --out $O/final_step.csv
+python analysis/token_summary.py --input $IN --labels "${LAB[@]}" --out $O/tokens.csv
+python analysis/truth_leak_explore.py --input $IN --labels "${LAB[@]}" --out_dir $O   # pull (Spot 2 보이기 전/후/끝내 안 보임)
+# 그림: R0 설계 도식, R2 Opus 네 조건, R3 모델별 요인 분해 (+ R3_factor_decomposition.csv)
+python analysis/plot_trunc_figures.py --design --r2_dir $O --r2_model "Claude Opus 4.6 (thinking off)" \
+  --models "Claude Opus 4.6" "Gemini 2.5 Pro" "GPT-5.4" \
+  --compare $O results/gemini-2.5-pro/vanilla/compare_2x2 results/gpt-5.4/vanilla/compare_2x2 --out_dir results/reviewer
+```
+- Single − Single-trunc 차이의 CI와 순열 p는 Single을 첫 입력으로 한 번 더 실행 (`--out_dir $R/compare_single3`)
+- `analysis/factor_decomposition_explore.py`: t = T 재현성, run 수준 회귀(정보, 문구, log 토큰)

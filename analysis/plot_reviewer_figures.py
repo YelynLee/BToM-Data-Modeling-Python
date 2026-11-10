@@ -2,8 +2,8 @@
 리뷰어 응답용 그림 / 표 (모델 여러 개를 한 그림에 비교).
 
   R1 : Every-step / Every-step-single / Prefix-step 분해 (1×4)
-       (a) hindsight 지수  (b) 마지막 스텝 belief r(사람) + End-step
-       (c) 마지막 스텝 belief r(같은 모델 End-step)  (d) 판단당 생성 토큰
+       (a) hindsight 지수  (b) 마지막 스텝 belief r(같은 모델 End-step)
+       (c) 마지막 스텝 belief r(사람) + End-step  (d) 판단당 생성 토큰
   S1 : 주요 지표 표 (조건별 추정치 [95% CI], Every-step 대비 차이 [CI], bootstrap p, 순열 p)
   C1 : control 사실 문항별 정확도 (q12 제외), 격자 경계 해석과 무관한 기준 함께 표시
   C2 : 시나리오별 사실 정확도 vs End-step |LLM - 사람| (desire, belief), Spearman + bootstrap CI
@@ -88,18 +88,18 @@ def fig_r1(models, compare_dirs, out):
         eb = [fb.loc[c, "r"] for c in conds_b]
         lo = [fb.loc[c, "r"] - fb.loc[c, "ci_low"] for c in conds_b]
         hi = [fb.loc[c, "ci_high"] - fb.loc[c, "r"] for c in conds_b]
-        axes[1].plot(xb[:3], eb[:3], color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[1].errorbar(xb, eb, yerr=[lo, hi], fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white",
+        axes[2].plot(xb[:3], eb[:3], color=col, lw=1.4, alpha=0.6, zorder=2)
+        axes[2].errorbar(xb, eb, yerr=[lo, hi], fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white",
                          markeredgewidth=1.2, zorder=3)
         if mi == 0 and "BToM" in fb.index:
-            axes[1].axhline(fb.loc["BToM", "r"], color=INK2, ls="--", lw=1, zorder=1)
-            axes[1].text(-0.35, fb.loc["BToM", "r"] + 0.03, "BToM–human", color=INK2, fontsize=8.5, ha="left")
+            axes[2].axhline(fb.loc["BToM", "r"], color=INK2, ls="--", lw=1, zorder=1)
+            axes[2].text(-0.35, fb.loc["BToM", "r"] + 0.03, "BToM–human", color=INK2, fontsize=8.5, ha="left")
 
         # (c) final-step belief r(own End-step); Prefix-step at t = T uses the End-step prompt (= reliability)
         fe = f[(f.dimension == "belief") & (f.versus == "End-step")].set_index("condition")
         ee = [fe.loc[c, "r"] for c in CONDS]
-        axes[2].plot(x, ee, color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[2].errorbar(x, ee, yerr=[[fe.loc[c, "r"] - fe.loc[c, "ci_low"] for c in CONDS],
+        axes[1].plot(x, ee, color=col, lw=1.4, alpha=0.6, zorder=2)
+        axes[1].errorbar(x, ee, yerr=[[fe.loc[c, "r"] - fe.loc[c, "ci_low"] for c in CONDS],
                                       [fe.loc[c, "ci_high"] - fe.loc[c, "r"] for c in CONDS]],
                          fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3)
 
@@ -118,19 +118,19 @@ def fig_r1(models, compare_dirs, out):
     ax.text(2.45, 1.05, "Hindsight", color=INK2, fontsize=8.5, ha="right")
     ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
     ax.set_ylabel("Hindsight index (belief)")
-    ax.set_title("(a) Pull toward Hindsight", loc="left", fontsize=11)
-    ax = axes[1]
+    ax.set_title("(a) Hindsight index", loc="left", fontsize=11)
+    ax = axes[2]
     ax.axhline(0, color=INK2, lw=1)
     ax.set_xticks(range(4), [COND_SHORT[c] for c in CONDS + ["End-step"]])
     ax.set_ylabel("r with human (belief, t = T)")
     ax.set_ylim(-0.3, 1.0)
-    ax.set_title("(b) Final step: same information as End-step", loc="left", fontsize=11)
-    ax = axes[2]
+    ax.set_title("(c) Agreement with human ratings", loc="left", fontsize=11)
+    ax = axes[1]
     ax.axhline(0, color=INK2, lw=1)
     ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
     ax.set_ylabel("r with own End-step (belief, t = T)")
     ax.set_ylim(-0.5, 1.0)
-    ax.set_title("(c) Final step: agreement with own End-step", loc="left", fontsize=11)
+    ax.set_title("(b) Agreement with own End-step ratings", loc="left", fontsize=11)
     ax.text(2.45, -0.46, "Prefix-step at t = T = End-step prompt\n(run-to-run reliability)", color=INK2,
             fontsize=8, ha="right", va="bottom")
     ax = axes[3]

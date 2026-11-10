@@ -1,120 +1,150 @@
 """
-탐색적 분석: Spot 2 내용(참 상태) 쪽으로 끌리는 정도를 Spot 2가 보이기 전 / 후 / 끝내 안 보임으로 나눠 계산.
-  - truth-leak index: (LLM - BToM)을 (참 one-hot - BToM) 방향으로 사영, 시나리오별 Σnum/Σden. 0 = BToM, 1 = 참 확신
-  - 보이기 전(t < t_vis) 값은 미래 정보 누출, 끝내 안 보이는 시나리오는 음성 대조
-  - Spot 2가 보인 뒤 BToM / Hindsight / 현재 belief(보인 뒤 = 참) 레퍼런스와의 평균 절대오차
-기본 조건은 Opus(Every 논문 16회, Single-trunc, Prefix). 다른 조건은 인자로 추가:
-  python analysis/truth_leak_explore.py "Every-step-single=results/claude-opus-4-6/vanilla/singlestep/thinking_off"
-출력: results/claude-opus-4-6/vanilla/compare_trunc/truth_leak_index.csv, truth_leak_steps.csv
-"""
-import sys, os, glob, numpy as np, pandas as pd, scipy.io as sio
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path[:0] = [REPO, REPO + '/src']; os.chdir(REPO)
-from src.dataset import df_btom
-R = 'results/claude-opus-4-6/vanilla'
-COND = {'Every (paper)': R + '/everystep_paper/everystep_valid_only.csv',
-        'Single-trunc': R + '/singlestep_trunc/thinking_off',
-        'Prefix-step': R + '/prefixstep/thinking_off'}
-EXTRA = sys.argv[1:]  # optional label=path pairs (e.g. Single)
-for e in EXTRA:
-    k, v = e.split('='); COND[k] = v
-OPT = ['L', 'M', 'Empty']
+Spot 2의 실제 내용(참 상태) 쪽으로 끌리는 정도(pull)를 Spot 2가 보이기 전 / 보인 뒤 / 끝내 안 보임으로 나눠 계산.
 
-def load(path):
-    if path.endswith('.csv'):
+  pull: 각 스텝에서 (LLM - BToM)을 (참 one-hot - BToM) 방향으로 사영해 시나리오별 Σnum/Σden. 0 = BToM, 1 = 참 확신
+        TrueBelief 모델의 belief는 모든 스텝에서 참 one-hot이므로 pull = TrueBelief 방향 사영 지수와 같음
+  구간: pre  = t < t_vis (나중에 Spot 2를 보는 시나리오). TrueBelief는 1, Hindsight는 0을 예측 → 두 모델을 가르는 구간
+        post = t >= t_vis. Hindsight와 참 방향이 거의 같음(코사인 약 0.99)
+        never = Spot 2를 끝내 못 보는 시나리오 (음성 대조)
+  추가: Spot 2가 보인 뒤 BToM / Hindsight / 현재 belief(보인 뒤 = 참)와의 평균 절대오차
+
+사용 예)
+  R=results/claude-opus-4-6/vanilla
+  python analysis/truth_leak_explore.py \\
+      --input $R/everystep/thinking_off/rerun $R/singlestep/thinking_off $R/singlestep_trunc/thinking_off $R/prefixstep/thinking_off \\
+      --labels "Every-step" "Every-step-single" "Single-trunc" "Prefix-step" --out_dir $R/compare_4cond
+출력: truth_leak_index.csv (구간 x 조건 추정치와 CI), truth_leak_pairs.csv (조건 쌍 차이, 순열 p), truth_leak_steps.csv
+"""
+import os
+import sys
+import glob
+import argparse
+import numpy as np
+import pandas as pd
+import scipy.io as sio
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for p in (ROOT, os.path.join(ROOT, "src")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+OPT = ["L", "M", "Empty"]
+SEGMENTS = {"pre": "before Spot 2 visible (t < t_vis)", "post": "after Spot 2 visible (t >= t_vis)",
+            "never": "Spot 2 never visible (negative control)"}
+
+
+def load_ratings(path):
+    if path.endswith(".csv"):
         d = pd.read_csv(path)
     else:
-        d = pd.concat([pd.read_csv(f).assign(subject_id=i) for i, f in enumerate(sorted(glob.glob(path + '/subject_*.csv')))])
-    d = d[['subject_id', 'scenario_id', 'time_step'] + [f'belief_{o}' for o in OPT]].dropna()
-    m = d.groupby(['scenario_id', 'time_step'])[[f'belief_{o}' for o in OPT]].mean()
-    x = np.maximum(m.values - 1, 0); s = x.sum(1, keepdims=True); s[s == 0] = np.nan
+        d = pd.concat([pd.read_csv(f).assign(subject_id=i)
+                       for i, f in enumerate(sorted(glob.glob(os.path.join(path, "subject_*.csv"))))])
+    cols = [f"belief_{o}" for o in OPT]
+    m = d.dropna(subset=cols).groupby(["scenario_id", "time_step"])[cols].mean()
+    x = np.maximum(m.values - 1, 0)
+    s = x.sum(1, keepdims=True)
+    s[s == 0] = np.nan
     return pd.DataFrame(x / s, index=m.index, columns=OPT)
 
-def mat(name, f):
-    b = sio.loadmat(f'data/{name}/{f}', squeeze_me=True)['belief_marg']
+
+def load_refs():
+    def mat(name, f):
+        b = sio.loadmat(os.path.join(ROOT, "data", name, f), squeeze_me=True)["belief_marg"]
+        return [np.atleast_2d(b[i]).reshape(3, -1) for i in range(len(b))]
+    return (mat("btom", "btom_everystep_beta2.5.mat"), mat("hindsight", "hindsight_everystep_beta3.5.mat"),
+            mat("truebelief", "truebelief_everystep_beta9.0.mat"))
+
+
+def scenario_info():
+    from src.dataset import df_btom
+    _, _, TB = load_refs()
+    info = {}
+    for sc, g in df_btom.groupby("scenario_id"):
+        if "is_irrational" in g and int(g.is_irrational.iloc[0]) == 1:
+            continue
+        vis = g.loc[g.visible_goal2 == 1, "time_step"]
+        info[int(sc)] = dict(T=int(g.time_step.max()), tvis=int(vis.min()) if len(vis) else None, truth=TB[sc - 1][:, 0])
+    return info
+
+
+def step_table(conds):
+    BT, HS, _ = load_refs()
+    info = scenario_info()
     rows = []
-    for ns in range(78):
-        a = np.atleast_2d(b[ns]); a = a.reshape(3, -1) if a.shape[0] != 3 else a
-        rows.append(a)
-    return rows
-BT = mat('btom', 'btom_everystep_beta2.5.mat'); HS = mat('hindsight', 'hindsight_everystep_beta3.5.mat')
-TB = mat('truebelief', 'truebelief_everystep_beta9.0.mat')
+    for lab, path in conds.items():
+        for (sc, t), v in load_ratings(path).iterrows():
+            if sc not in info or v.isna().any():
+                continue
+            I = info[sc]
+            j = min(t - 1, BT[sc - 1].shape[1] - 1)
+            b, h = BT[sc - 1][:, j], HS[sc - 1][:, j]
+            seen = I["tvis"] is not None
+            seg = "never" if not seen else ("pre" if t < I["tvis"] else "post")
+            d = I["truth"] - b
+            den = float(d @ d)
+            cur = I["truth"] if seg == "post" else b
+            rows.append(dict(cond=lab, sc=sc, t=t, segment=seg,
+                             num=float((v.values - b) @ d) if den >= 0.05 ** 2 else 0.0,
+                             den=den if den >= 0.05 ** 2 else 0.0,
+                             err_btom=np.abs(v.values - b).mean(), err_hindsight=np.abs(v.values - h).mean(),
+                             err_current=np.abs(v.values - cur).mean()))
+    return pd.DataFrame(rows)
 
-traj = df_btom[df_btom.is_irrational == 0] if 'is_irrational' in df_btom else df_btom
-info = {}
-for sc, g in traj.groupby('scenario_id'):
-    T = int(g.time_step.max()); vis = g.loc[g.visible_goal2 == 1, 'time_step']
-    tv = int(vis.min()) if len(vis) else None
-    truth = TB[sc - 1][:, 0]
-    info[sc] = dict(T=T, tvis=tv, truth=truth, group=int(g.group_id.iloc[0]))
 
-def ref(rows, sc, t):
-    a = rows[sc - 1]; return a[:, min(t - 1, a.shape[1] - 1)]
+def scenario_pull(L):
+    g = L.groupby(["cond", "segment", "sc"])[["num", "den"]].sum()
+    g = g[g.den > 0]
+    return (g.num / g.den).rename("pull").reset_index()
 
-def proj(llm, b, target):
-    d = target - b; den = d @ d
-    return (np.nan, 0.0) if den < 0.05 ** 2 else ((llm - b) @ d, den)
 
-data = {k: load(v) for k, v in COND.items()}
-rows = []
-for k, df in data.items():
-    for (sc, t), v in df.iterrows():
-        if sc not in info: continue
-        I = info[sc]; b = ref(BT, sc, t); llm = v.values
-        cur = I['truth'] if (I['tvis'] is not None and t >= I['tvis']) else b   # agent's current belief proxy
-        num_l, den_l = proj(llm, b, I['truth'])
-        rows.append(dict(cond=k, sc=sc, t=t, T=I['T'], tvis=I['tvis'], group=I['group'],
-                         phase=('pre' if I['tvis'] is None or t < I['tvis'] else 'post'),
-                         seen=I['tvis'] is not None, num=num_l, den=den_l,
-                         p_truth=llm @ I['truth'], p_truth_btom=b @ I['truth'],
-                         err_btom=np.abs(llm - b).mean(), err_cur=np.abs(llm - cur).mean(),
-                         err_hs=np.abs(llm - ref(HS, sc, t)).mean(), remain=I['T'] - t))
-L = pd.DataFrame(rows)
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--input", nargs="+", required=True)
+    ap.add_argument("--labels", nargs="+", required=True)
+    ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--n_boot", type=int, default=2000)
+    ap.add_argument("--n_perm", type=int, default=10000)
+    ap.add_argument("--seed", type=int, default=0)
+    a = ap.parse_args()
+    assert len(a.input) == len(a.labels)
+    rng = np.random.default_rng(a.seed)
+    conds = dict(zip(a.labels, a.input))
+    L = step_table(conds)
+    P = scenario_pull(L)
 
-def scen_index(sub):
-    s = sub.groupby('sc').apply(lambda g: g.num.sum() / g.den.sum() if g.den.sum() > 0 else np.nan, include_groups=False)
-    return s.dropna()
-rng = np.random.default_rng(0)
-def boot(s, n=2000):
-    v = s.values; return np.percentile([v[rng.integers(0, len(v), len(v))].mean() for _ in range(n)], [2.5, 97.5])
-def pperm(d, n=10000):
-    d = d[~np.isnan(d)]; s = rng.choice([-1, 1], (n, len(d))); null = (s * d).mean(1)
-    return (np.sum(np.abs(null) >= abs(d.mean())) + 1) / (n + 1)
+    def boot(v):
+        return np.percentile([v[rng.integers(0, len(v), len(v))].mean() for _ in range(a.n_boot)], [2.5, 97.5])
 
-out = []
-print('\n=== Truth-leak index (0 = BToM, 1 = certain of true Spot-2 content) ===')
-seg = {'pre-vis (seen later, t < t_vis)': lambda L: L[(L.phase == 'pre') & L.seen],
-       'post-vis (t >= t_vis)': lambda L: L[L.phase == 'post'],
-       'never seen (No-check; negative control)': lambda L: L[~L.seen]}
-idx = {}
-for name, f in seg.items():
-    for k in COND:
-        s = scen_index(f(L[L.cond == k])); idx[(name, k)] = s
-        lo, hi = boot(s) if len(s) > 2 else (np.nan, np.nan)
-        print(f'{name:42s} {k:16s} {s.mean():+.2f} [{lo:+.2f}, {hi:+.2f}]  n_scen={len(s)}')
-        out.append(dict(segment=name, cond=k, est=s.mean(), lo=lo, hi=hi, n=len(s)))
-print('\n--- paired differences (scenario sign-flip) ---')
-conds = list(COND)
-for name in seg:
-    for i in range(len(conds)):
-        for j in range(i + 1, len(conds)):
-            a, b = idx[(name, conds[i])], idx[(name, conds[j])]; d = (a - b).dropna()
-            if len(d) > 2:
-                lo, hi = boot(d); print(f'{name:42s} {conds[i]} - {conds[j]}: {d.mean():+.2f} [{lo:+.2f}, {hi:+.2f}] p={pperm(d.values):.4f}')
+    out, pairs = [], []
+    for seg in SEGMENTS:
+        for lab in a.labels:
+            v = P[(P.segment == seg) & (P.cond == lab)].pull.values
+            lo, hi = boot(v)
+            out.append(dict(segment=seg, segment_label=SEGMENTS[seg], condition=lab, estimate=v.mean(),
+                            ci_low=lo, ci_high=hi, n_scenarios=len(v)))
+        W = P[P.segment == seg].pivot(index="sc", columns="cond", values="pull")
+        for i, x in enumerate(a.labels):
+            for y in a.labels[i + 1:]:
+                d = (W[y] - W[x]).dropna().values
+                lo, hi = boot(d)
+                null = (rng.choice([-1, 1], (a.n_perm, len(d))) * d).mean(1)
+                p = (np.sum(np.abs(null) >= abs(d.mean())) + 1) / (a.n_perm + 1)
+                pairs.append(dict(segment=seg, comparison=f"{y} - {x}", estimate=d.mean(), ci_low=lo, ci_high=hi,
+                                  p_perm=p, n_scenarios=len(d)))
+    out, pairs = pd.DataFrame(out), pd.DataFrame(pairs)
+    err = (L[L.segment == "post"].groupby(["cond", "sc"])[["err_btom", "err_hindsight", "err_current"]].mean()
+           .groupby("cond").mean().reindex(a.labels))
+    os.makedirs(a.out_dir, exist_ok=True)
+    out.to_csv(os.path.join(a.out_dir, "truth_leak_index.csv"), index=False)
+    pairs.to_csv(os.path.join(a.out_dir, "truth_leak_pairs.csv"), index=False)
+    err.to_csv(os.path.join(a.out_dir, "truth_leak_post_errors.csv"))
+    L.to_csv(os.path.join(a.out_dir, "truth_leak_steps.csv"), index=False)
+    pd.set_option("display.width", 200)
+    print(out.round(3).to_string(index=False))
+    print(pairs.round(4).to_string(index=False))
+    print("\nMean abs error after Spot 2 visible (lower = closer):")
+    print(err.round(3).to_string())
 
-print('\n=== Mean abs error vs references, post-vis steps (lower = closer) ===')
-for k in COND:
-    sub = L[(L.cond == k) & (L.phase == 'post')].groupby('sc')[['err_btom', 'err_hs', 'err_cur']].mean()
-    print(f'{k:16s} BToM {sub.err_btom.mean():.3f} | Hindsight {sub.err_hs.mean():.3f} | Current-belief(truth) {sub.err_cur.mean():.3f}')
 
-print('\n=== Pre-vis leak vs remaining future steps (T - t), seen scenarios ===')
-for k in COND:
-    sub = L[(L.cond == k) & (L.phase == 'pre') & L.seen].copy()
-    sub['leak'] = sub.p_truth - sub.p_truth_btom
-    sub['steps_to_vis'] = sub.tvis - sub.t
-    from scipy.stats import spearmanr
-    # within-scenario rank correlation, averaged
-    rs = [spearmanr(g.steps_to_vis, g.leak)[0] for _, g in sub.groupby('sc') if g.steps_to_vis.nunique() > 2]
-    rs = pd.Series(rs).dropna()
-    print(f'{k:16s} mean leak(p_truth - BToM) {sub.leak.mean():+.3f}; within-scen rho(steps until visible, leak) {rs.mean():+.2f} (n={len(rs)})')
-pd.DataFrame(out).to_csv(R + '/compare_trunc/truth_leak_index.csv', index=False)
-L.to_csv(R + '/compare_trunc/truth_leak_steps.csv', index=False)
+if __name__ == "__main__":
+    main()
