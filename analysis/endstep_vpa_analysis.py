@@ -4,7 +4,10 @@ import argparse
 import pickle
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
+try:
+    import statsmodels.api as sm   # 기존 calculate_* 함수에서만 사용
+except ImportError:
+    sm = None
 from scipy.stats import zscore
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -230,92 +233,63 @@ def draw_vpa_grouped_bars(master_results, condition, save_dir):
     plt.close()
     print(f"\n📊 Unique VPA Stacked Bars saved to: {save_path}")
 
-def run_vpa_analysis(condition, exclude_partial):
-    mode_text = "EXCL. PARTIAL" if exclude_partial else "INCL. PARTIAL"
+DISPLAY = {'gpt-4o': 'GPT-4o', 'gpt-5.4': 'GPT-5.4', 'o4-mini': 'GPT-o4-mini', 'gemini-2.5-flash': 'Gemini-2.5-Flash',
+           'deepseek-chat': 'DeepSeek-V3.2', 'claude-sonnet-4-6': 'Claude-4.6-Sonnet', 'gemini-2.5-pro': 'Gemini-2.5-Pro',
+           'deepseek-reasoner': 'DeepSeek-R1', 'deepseek-v4-pro': 'DeepSeek-V4-Pro', 'claude-opus-4-6': 'Claude-4.6-Opus'}
+
+
+def run_vpa_analysis(condition, exclude_partial, n_boot=1000, seed=0, with_hindsight=False, out_dir=None):
+    """논문 Fig 4b(Worse) / Fig S3(Better)과 같은 디자인 + CI, β, total adj. R²."""
+    from analysis.vpa_plot import vpa_with_ci, draw_vpa, results_to_frame
+
     valid_mask = get_valid_indices(exclude_partial=exclude_partial)
-    
-    print("\n" + "="*90)
-    print(f"🚀 VPA Analysis [ALL MODELS | {condition} | {mode_text}]")
-    print("="*90)
+    scen_ids = np.where(valid_mask)[0] + 1
+    print("\n" + "=" * 90)
+    print(f"🚀 End-step VPA [{condition} | {'EXCL.' if exclude_partial else 'INCL.'} PARTIAL | {len(scen_ids)} scenarios | bootstrap {n_boot}]")
+    print("=" * 90)
 
-    ref_data_dict = {}
-    for ref in ALL_REFS:
-        path = os.path.join(REFERENCE_PKL_DIR, ref, f"{ref}_data.pkl")
-        data = load_pickle_safe(path)
-        if data is not None:
-            ref_data_dict[ref] = data
+    preds = {'Desire': ['btom', 'truebelief', 'nocost', 'motionheuristic'],
+             'Belief': ['btom', 'truebelief', 'nocost', 'motionheuristic'] + (['hindsight'] if with_hindsight else [])}
+    needed = sorted(set(preds['Desire']) | set(preds['Belief']))
+    ref_data = {r: load_pickle_safe(os.path.join(REFERENCE_PKL_DIR, r, f"{r}_data.pkl")) for r in needed}
+    keys = {'Desire': 'des_inf_mean', 'Belief': 'bel_inf_mean_norm'}
 
-    target_keys = {
-        'Desire': 'des_inf_mean',
-        'Belief': 'bel_inf_mean_norm'
-    }
-    
-    master_results_dict = {}
-
-    for llm_name in LLM_MODELS:
-        llm_path = os.path.join(BASE_RESULTS_DIR, llm_name, condition, "model_data.pkl")
-        llm_data = load_pickle_safe(llm_path)
-        
-        if llm_data is None:
+    results = {}
+    for llm in LLM_MODELS:
+        d = load_pickle_safe(os.path.join(BASE_RESULTS_DIR, llm, condition, "model_data.pkl"))
+        if d is None:
             continue
+        print(f"⏳ {llm}")
+        results[llm] = {}
+        for dim, key in keys.items():
+            y = extract_flat_data(d, valid_mask, key)
+            X = np.column_stack([extract_flat_data(ref_data[r], valid_mask, key) for r in preds[dim]])
+            scen = np.tile(scen_ids, d[key].shape[0])          # (옵션 x 시나리오)를 펼친 순서와 같음
+            results[llm][dim] = vpa_with_ci(y, X, preds[dim], scen, n_boot=n_boot, seed=seed)
 
-        print(f"\n⏳ VPA Processing: {llm_name}...")
-        results_dict = {}
-        
-        for cat_name, key in target_keys.items():
-            Y_llm = extract_flat_data(llm_data, valid_mask, key)
-            df_reg = pd.DataFrame({'LLM': Y_llm})
-            
-            for ref in ALL_REFS:
-                if ref in ref_data_dict:
-                    df_reg[ref] = extract_flat_data(ref_data_dict[ref], valid_mask, key)
+    save_dir = out_dir or os.path.join(parent_dir, "results", "stats", "vpa")
+    os.makedirs(save_dir, exist_ok=True)
+    tag = f"{condition}{'_hindsight' if with_hindsight else ''}"
+    for grp, models, blocks, color in [("Worse", WORSE_MODELS, 2, "#D6006F"), ("Better", BETTER_MODELS, 1, "#5FA318")]:
+        rows = [(DISPLAY.get(m, m), results[m]) for m in models if m in results]
+        if not rows:
+            continue
+        draw_vpa(rows, os.path.join(save_dir, f"vpa_endstep_{tag}_{grp.lower()}.png"), predictors=preds,
+                 blocks=blocks, header=grp, header_color=color,
+                 legend_refs=['btom', 'truebelief', 'nocost', 'motionheuristic', 'hindsight'])
+    allrows = [(DISPLAY.get(m, m), results[m]) for m in LLM_MODELS if m in results]
+    csv = os.path.join(save_dir, f"vpa_endstep_{tag}.csv")
+    results_to_frame(allrows).to_csv(csv, index=False)
+    print(f"💾 {csv}")
 
-            df_reg.dropna(inplace=True)
-            if len(df_reg) == 0: continue
-
-            df_reg_std = df_reg.apply(zscore)
-            available_refs = [r for r in ALL_REFS if r in df_reg_std.columns]
-            
-            # 1. Step 1: 전체 변수로 VPA
-            full_vpa_res = calculate_vpa(df_reg_std, 'LLM', available_refs)
-            
-            # lesion_uniques = {k: v for k, v in full_vpa_res['unique'].items() if k != 'btom'}
-            # top_lesion = max(lesion_uniques, key=lesion_uniques.get) if lesion_uniques else None
-            
-            # # 2. Step 2: 1:1 VPA 재계산
-            # if top_lesion and 'btom' in available_refs:
-            #     # 1:1일 때는 기존 calculate_vpa(모든 경우의 공통 분산을 합침)와 메커니즘이 동일함
-            #     X_p = sm.add_constant(df_reg_std[['btom', top_lesion]])
-            #     r2_p = max(0, sm.OLS(df_reg_std['LLM'], X_p).fit().rsquared_adj)
-                
-            #     u_b = max(0, r2_p - max(0, sm.OLS(df_reg_std['LLM'], sm.add_constant(df_reg_std[[top_lesion]])).fit().rsquared_adj))
-            #     u_l = max(0, r2_p - max(0, sm.OLS(df_reg_std['LLM'], sm.add_constant(df_reg_std[['btom']])).fit().rsquared_adj))
-            #     sh_p = max(0, r2_p - u_b - u_l)
-                
-            #     pair_vpa_res = {'total_r2': r2_p, 'unique': {'btom': u_b, top_lesion: u_l}, 'shared': sh_p}
-            # else:
-            #     pair_vpa_res = None
-                
-            # 3. 양쪽 결과를 모두 저장
-            results_dict[cat_name] = {
-                'full_vpa': full_vpa_res
-                # 'pairwise_vpa': pair_vpa_res,
-                # 'top_lesion': top_lesion
-            }
-
-        if 'Desire' in results_dict and 'Belief' in results_dict:
-            master_results_dict[llm_name] = results_dict
-
-    if master_results_dict:
-        plot_save_dir = os.path.join(parent_dir, "results")
-        draw_vpa_grouped_bars(master_results_dict, condition, plot_save_dir)
-    else:
-        print("❌ No valid data collected to draw the VPA plots.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Hybrid VPA on LLM ToM scores.")
+    parser = argparse.ArgumentParser(description="End-step VPA (Fig 4b: Worse, Fig S3: Better) with CI, beta, total R2.")
     parser.add_argument("--condition", type=str, default="vanilla", help="Experiment condition")
     parser.add_argument("--exclude_partial", action="store_true", help="Exclude Check-Partial groups")
-
+    parser.add_argument("--n_boot", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--with_hindsight", action="store_true", help="belief에 Hindsight 예측변수 추가 (논문은 제외)")
+    parser.add_argument("--out_dir", default=None)
     args = parser.parse_args()
-    run_vpa_analysis(args.condition, args.exclude_partial)
+    run_vpa_analysis(args.condition, args.exclude_partial, args.n_boot, args.seed, args.with_hindsight, args.out_dir)

@@ -44,6 +44,7 @@ REF_LABEL = {"btom": "BToM", "truebelief": "TrueBelief", "nocost": "NoCost", "mo
 DIMS = {"desire": slice(0, 3), "belief": slice(3, 6)}
 PHASES = [1, 2, 3, 4, 5, 6]
 PH_LABEL = {1: "Approach\nG1", 2: "Pass\nG1", 3: "See\nG2", 4: "Stop", 5: "Return G1 /\nApproach G2", 6: "Selected"}
+SIGN_EPS = 1e-3   # 이보다 작은 레퍼런스 변화는 '변화 없음'으로 보고 방향 일치 계산에서 제외
 SHORT = {1: "App G1", 2: "Pass G1", 3: "See G2", 4: "Stop", 5: "Ret/App", 6: "Select"}
 COND_COL = {"Every-step": "#888780", "Every-step-single": "#D85A30", "Single-trunc": "#BA7517", "Prefix-step": "#1D9E75"}
 plt.rcParams.update({"font.size": 9.5, "axes.spines.top": False, "axes.spines.right": False})
@@ -132,9 +133,17 @@ def main():
                     bs = [r_from(sum(st[s] for s in b if s in st)) for b in boot]
                     lo, hi = np.nanpercentile(bs, [2.5, 97.5]) if np.isfinite(est) else (np.nan, np.nan)
                     n_steps = int(sum(v[0] for v in st.values()) // 3)
+                    # 방향 일치: 레퍼런스가 조금이라도 바뀐 (옵션 x 스텝)에서 LLM 변화의 부호가 같은 비율 / 반대인 비율
+                    x_, y_ = dl[:, sl][mask], dref[refname][:, sl][mask]
+                    ok = np.isfinite(x_) & np.isfinite(y_) & (np.abs(y_) > SIGN_EPS)
+                    # |Δ레퍼런스| 가중: 큰 갱신일수록 크게 반영 (임계값 없이 미세한 변화의 부호 잡음을 줄임)
+                    w = np.abs(y_[ok])
+                    same = float(np.sum(w * (np.sign(x_[ok]) == np.sign(y_[ok]))) / w.sum()) if ok.any() else np.nan
+                    opp = float(np.sum(w * (np.sign(x_[ok]) == -np.sign(y_[ok]))) / w.sum()) if ok.any() else np.nan
                     res.append(dict(model=model, condition=cond, dimension=dim, reference=REF_LABEL[refname],
                                     phase=PHASE_NAMES.get(ph, "all") if ph != "all" else "all", phase_idx=ph,
-                                    r=est, ci_low=lo, ci_high=hi, n_steps=n_steps, n_scenarios=len(st)))
+                                    r=est, ci_low=lo, ci_high=hi, n_steps=n_steps, n_scenarios=len(st),
+                                    sign_same=same, sign_opposite=opp, n_sign=int(ok.sum())))
         print(f"done: {model} / {cond}")
     for dim, sl in DIMS.items():
         for refname in ["btom"]:
@@ -173,9 +182,14 @@ def main():
                 al = g[g.x > 6]
                 ax.errorbar(al.x + off, al.r, yerr=[al.r - al.ci_low, al.ci_high - al.r], color=COND_COL[c],
                             marker="D", ms=5, elinewidth=0.9, ls="none")
+                if len(al) and np.isfinite(al.sign_same.iloc[0]):
+                    ax.text(7.95, 0.92 - 0.13 * k, f"{al.sign_same.iloc[0]*100:.0f}/{al.sign_opposite.iloc[0]*100:.0f}", color=COND_COL[c], fontsize=7.2,
+                            ha="left", va="center", fontweight="bold")
                 handles[c] = h
             style(ax)
             ax.set_ylim(-0.75, 1.0)
+            ax.set_xlim(0.5, 8.6)
+            ax.text(7.95, 1.04, "same/opp\n(%)", fontsize=6.5, color="#555", ha="left", va="bottom")
             if j == 0:
                 ax.set_ylabel(f"{dim.capitalize()} updates\nr(Δ LLM, Δ BToM)")
             else:
@@ -208,9 +222,11 @@ def main():
             ax.set_ylabel("Belief update size\nmean |Δ| (log scale)")
         else:
             ax.set_yticklabels([])
+        ax.set_xlim(0.5, 8.6)
     fig.legend(handles.values(), handles.keys(), loc="upper center", ncol=len(handles), frameon=False,
                bbox_to_anchor=(0.5, 1.035), fontsize=9)
-    fig.suptitle("Step-to-step updates by trajectory phase (95% scenario-bootstrap CI; ◆ = all steps)",
+    fig.suptitle("Step-to-step updates by trajectory phase (95% scenario-bootstrap CI; ◆ = all steps; "
+                 "same/opp = % of BToM change (weighted by |Δ BToM|) matched / reversed in sign; remainder = no LLM change)",
                  fontsize=11, y=1.07)
     fig.tight_layout()
     fig.savefig(os.path.join(a.out_dir, "U1_update_vs_btom.png"), dpi=200, bbox_inches="tight")
