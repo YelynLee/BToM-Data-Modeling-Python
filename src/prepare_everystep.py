@@ -245,11 +245,37 @@ def apply_phase_labeling(df):
 # =========================================================================
 # 3. Reference Everystep 데이터 로드 함수
 # =========================================================================
-def load_reference_everystep(ref_model_name):
+# .mat 열과 궤적 스텝의 대응 (stimuli.mat 기준)
+#   - .mat의 k번째 열 = 경로의 1..k번째 위치를 관찰한 뒤의 사후확률. 첫 열은 출발 위치(= 로그의 Time Step 1)이며 순수 prior가 아님
+#   - 끝까지 간 시나리오(finished = 1, 54개)는 경로 끝에 종료 상태(인덱스 76 = 트럭에서 먹음)가 하나 더 있어
+#     .mat 열이 궤적 행보다 1개 많음(T + 1). 이 마지막 열이 End-step 레퍼런스(*_data.pkl)와 같은 최종 사후확률
+#   - 중간에 끝난 시나리오(finished = 0, 24개)는 열 수 = T
+# FINAL_MODE
+#   "posterior" (기본): t < T는 t번째 열, t = T는 마지막 열(도착 + 선택). 단계별 t = T 값이 End-step 레퍼런스와 같아짐
+#   "position"       : 모든 t에 t번째 열 (2026-11 이전 방식. 선택 사건의 갱신이 빠지며 NoCost desire는 평평해짐)
+# 환경변수 BTOM_FINAL_MODE로 바꿀 수 있음 (예: BTOM_FINAL_MODE=position python analysis/...)
+FINAL_MODE = os.environ.get("BTOM_FINAL_MODE", "posterior")
+
+
+def everystep_column(t, T, n_cols, final_mode=None):
+    """궤적 스텝 t (1..T)에 대응하는 .mat 열 인덱스(0 기준)."""
+    mode = final_mode or FINAL_MODE
+    if mode not in ("posterior", "position"):
+        raise ValueError(f"unknown final_mode: {mode}")
+    if mode == "posterior" and t == T and n_cols == T + 1:
+        return n_cols - 1
+    return min(t - 1, n_cols - 1)
+
+
+def load_reference_everystep(ref_model_name, final_mode=None):
     """
     지정된 Reference Model의 매 스텝 데이터(.mat)를 불러와
-    df_btom 구조와 매핑하고 Phase를 라벨링합니다. (Prior 데이터 t=0 포함)
+    df_btom 구조와 매핑하고 Phase를 라벨링합니다.
+    final_mode: None이면 FINAL_MODE("posterior"). 위 설명 참고.
+    마지막에 T + 1 행을 하나 덧붙이는데(그림의 'Selected' 연장점), 값은 최종 사후확률(마지막 열)입니다.
     """
+    final_mode = final_mode or FINAL_MODE
+    final_cols = {}   # scenario_id -> 마지막 열 값 (desire 3개, belief 3개)
     df_merged = None # 최종 병합될 데이터프레임 초기화
     
     # ---------------------------------------------------------------------
@@ -338,12 +364,13 @@ def load_reference_everystep(ref_model_name):
         # 💡 [핵심 수정] apply_phase_labeling에서 발생하는 KeyError 방지
         # 인지 모델은 피험자 0번(정답)으로 취급함을 명시적으로 할당
         df_merged['subject_id'] = 0
+        traj_len = df_merged.groupby('scenario_id')['time_step'].transform('max').to_numpy()
         
         # 병합할 빈 리스트들
         r_K_list, r_L_list, r_M_list = [], [], []
         b_L_list, b_M_list, b_Empty_list = [], [], []
         
-        for idx, row in df_merged.iterrows():
+        for k, (idx, row) in enumerate(df_merged.iterrows()):
             ns = int(row['scenario_id']) - 1 # 0-based index
             t  = int(row['time_step']) # MATLAB의 time_step (1부터 시작)
             
@@ -354,11 +381,9 @@ def load_reference_everystep(ref_model_name):
             if b_arr.ndim == 1: b_arr = b_arr.reshape(3, -1)
             if r_arr.ndim == 1: r_arr = r_arr.reshape(3, -1)
             
-            # 💡 t=1(출발점)에는 BToM 배열의 인덱스 0(Prior)을, t=2에는 인덱스 1(Post1)을 매핑!
-            matlab_idx = min(t - 1, b_arr.shape[1] - 1)
-            
-            # 안전장치: 인덱스가 범위를 벗어나지 않도록
-            matlab_idx = min(matlab_idx, b_arr.shape[1] - 1)
+            # t번째 열(0 기준 t-1)은 출발~t번째 위치를 본 뒤의 사후확률. t = T는 FINAL_MODE에 따라 마지막 열
+            matlab_idx = everystep_column(t, int(traj_len[k]), b_arr.shape[1], final_mode)
+            final_cols[ns + 1] = np.r_[r_arr[:, -1], b_arr[:, -1]]
             
             r_K_list.append(r_arr[0, matlab_idx])
             r_L_list.append(r_arr[1, matlab_idx])
@@ -382,10 +407,13 @@ def load_reference_everystep(ref_model_name):
     df_extensions = df_merged.loc[idx_last_steps].copy()
     df_extensions['time_step'] += 1
     
-    # 연장된 행에 직전 행(각 시나리오의 원본 마지막 스텝)의 추론 점수들을 그대로 복사하여 유지시킵니다.
+    # 연장된 행에는 최종 사후확률(.mat 마지막 열)을 넣음. MotionHeuristic처럼 .mat이 없으면 직전 행 값을 유지
     score_columns = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
     for col in score_columns:
         df_extensions[col] = df_merged.loc[idx_last_steps, col].values
+    if final_cols:
+        fin = np.vstack([final_cols[int(sc)] for sc in df_extensions['scenario_id']])
+        df_extensions[score_columns] = fin
     
     # 원래 데이터프레임과 연장된 행들을 합치고 재정렬
     df_merged = pd.concat([df_merged, df_extensions]).sort_values(['scenario_id', 'time_step']).reset_index(drop=True)

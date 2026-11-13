@@ -39,6 +39,8 @@ for name,df,steps in [('Opus',OP,{'format (E-S)':('E','S'),'information (S-T)':(
     d=decomp(df,steps); d.insert(0,'model',name); d['n_scen']=len(df); print(d.round(3).to_string(index=False)); d.to_csv(f'{R}/compare_single3/decomp_{name}.csv',index=False)
 # ---------- (3) run-level regression with cell fixed effects (Opus Single / Trunc / Prefix) ----------
 from src.dataset import df_btom
+from src.prepare_everystep import everystep_column
+TLEN=df_btom.groupby('scenario_id').time_step.max().to_dict()
 def mat(n,f):
     b=sio.loadmat(f'data/{n}/{f}',squeeze_me=True)['belief_marg']; return [np.atleast_2d(b[i]).reshape(3,-1) for i in range(78)]
 BT=mat('btom','btom_everystep_beta2.5.mat'); HS=mat('hindsight','hindsight_everystep_beta3.5.mat')
@@ -51,7 +53,7 @@ for lab,path,info,word in [('Single',R+'/singlestep/thinking_off',1,1),('Trunc',
             if sc in irr: continue
             x=np.maximum(np.array([l,m,e])-1,0); s=x.sum()
             if s==0: continue
-            x=x/s; j=min(t-1,BT[sc-1].shape[1]-1); bt=BT[sc-1][:,j]; dd=HS[sc-1][:,j]-bt; den=dd@dd
+            x=x/s; j=everystep_column(t,TLEN[sc],BT[sc-1].shape[1]); bt=BT[sc-1][:,j]; dd=HS[sc-1][:,j]-bt; den=dd@dd
             if den<0.05**2: continue
             rows.append(dict(cond=lab,run=i,sc=sc,t=t,f_info=info,f_word=word,proj=(x-bt)@dd/den,tok=tok))
 D=pd.DataFrame(rows)

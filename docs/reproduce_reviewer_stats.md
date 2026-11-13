@@ -147,3 +147,21 @@ python analysis/plot_trunc_figures.py --design --r2_dir $O --r2_model "Claude Op
 ```
 - Single − Single-trunc 차이의 CI와 순열 p는 Single을 첫 입력으로 한 번 더 실행 (`--out_dir $R/compare_single3`)
 - `analysis/factor_decomposition_explore.py`: t = T 재현성, run 수준 회귀(정보, 문구, log 토큰)
+
+---
+
+## 6. 단계별 레퍼런스 대응 수정 (2026-11-13) 후 재실행
+
+`src/prepare_everystep.py`의 `load_reference_everystep`이 t = T에 .mat 마지막 열(도착 + 선택 후 최종 사후확률)을 씁니다(`FINAL_MODE = "posterior"`).
+이전 방식은 `BTOM_FINAL_MODE=position`을 붙여 실행하면 그대로 재현됩니다.
+
+| 영향 | 스크립트 |
+|---|---|
+| 바뀜 (단계별 레퍼런스 사용) | `compare_stepwise_bootstrap.py`, `update_agreement.py`, `truth_leak_explore.py`, `plot_stepwise_phase.py`, `factor_decomposition_explore.py`, 논문 그림 스크립트(`plot_everystep.py`, `everystep_vpa_analysis.py`, `calc_everystep_correlation.py` 등) |
+| 안 바뀜 (End-step pkl 사용) | `endstep_stats.py`, `final_step_compare.py`, `control_eval.py`, `token_summary.py` |
+
+재실행 순서
+1. 모델별 단계별 비교: 2절(`compare_2x2`, `single_vs_prefix`)과 5절(`compare_4cond`, `truth_leak_explore`)
+2. Every-step VPA (논문 Fig 5b, 4개 모델): 4절
+3. 그림: `plot_reviewer_figures.py`(R1, S1), `plot_trunc_figures.py`(R0, R2, R2b, R3), `update_agreement.py`(U1, U2), `plot_stepwise_phase.py`
+4. 확인: hindsight index와 rm_corr는 소수 셋째 자리까지 거의 같아야 함. desire VPA에는 NoCost가 새로 들어가고(이전에는 상수라 빠짐) BToM 고유분이 약 0.01 줄어듦

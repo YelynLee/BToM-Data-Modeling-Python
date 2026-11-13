@@ -28,6 +28,8 @@ for p in (ROOT, os.path.join(ROOT, "src")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from src.prepare_everystep import everystep_column
+
 OPT = ["L", "M", "Empty"]
 SEGMENTS = {"pre": "before Spot 2 visible (t < t_vis)", "post": "after Spot 2 visible (t >= t_vis)",
             "never": "Spot 2 never visible (negative control)"}
@@ -76,7 +78,7 @@ def step_table(conds):
             if sc not in info or v.isna().any():
                 continue
             I = info[sc]
-            j = min(t - 1, BT[sc - 1].shape[1] - 1)
+            j = everystep_column(t, I["T"], BT[sc - 1].shape[1])
             b, h = BT[sc - 1][:, j], HS[sc - 1][:, j]
             seen = I["tvis"] is not None
             seg = "never" if not seen else ("pre" if t < I["tvis"] else "post")
