@@ -120,14 +120,17 @@ def rows_from_summary(summary, labels, prefix="vpa"):
 
 # ------------------------------------------------------------------ 그림
 def draw_vpa(rows, out_path, predictors=None, blocks=1, title=None, header=None, header_color="#5FA318",
-             xmax=0.6, show_beta=True, show_ci=True, show_total=True, legend_refs=None, dpi=250):
+             xmax=0.6, show_beta=True, show_ci=True, show_total=True, legend_refs=None, dpi=250,
+             columns=None, col_fontsize=17, note=None):
     """
-    rows: [(행 이름, {"Desire": res, "Belief": res}), ...]  위에서 아래 순서. res는 vpa_with_ci 결과(또는 None)
-    predictors: {"Desire": [...], "Belief": [...]} 막대 순서. None이면 res에 있는 순서(REF_ORDER 기준)
+    rows: [(행 이름, {열 이름: res, ...}), ...]  위에서 아래 순서. res는 vpa_with_ci 결과(또는 None = no data)
+    columns: 열 이름 목록. 기본 ["Desire", "Belief"]. 예: 조건 이름들 (행 = 모델, belief만)
+    predictors: {열 이름: [...]} 막대 순서. None이면 REF_ORDER 중 res에 있는 것
     blocks: 행을 몇 묶음으로 나눠 옆으로 배치할지 (논문 Fig 4b는 2)
     header: 왼쪽 위 라벨 박스 문구(예: "Better"). None이면 생략
     """
-    dims = ["Desire", "Belief"]
+    dims = list(columns) if columns else ["Desire", "Belief"]
+    nc = len(dims)
     per_block = int(np.ceil(len(rows) / blocks))
     chunks = [rows[i * per_block:(i + 1) * per_block] for i in range(blocks)]
     # x축 상한: 막대·CI가 넘치지 않게
@@ -137,8 +140,8 @@ def draw_vpa(rows, out_path, predictors=None, blocks=1, title=None, header=None,
     # 열: [D, B] (+ 블록 사이 여백 열)
     widths = []
     for i in range(blocks):
-        widths += [1, 1] + ([0.55] if i < blocks - 1 else [])
-    fig = plt.figure(figsize=(4.6 * 2 * blocks + 1.2 * blocks, 1.75 * per_block + 1.6))
+        widths += [1] * nc + ([0.55] if i < blocks - 1 else [])
+    fig = plt.figure(figsize=(4.6 * nc * blocks + 1.2 * blocks, 1.75 * per_block + 1.6))
     gs = fig.add_gridspec(1, len(widths), width_ratios=widths, wspace=0.42 if show_beta else 0.18)
     cols = [i for i, w in enumerate(widths) if w == 1]
     axes = [fig.add_subplot(gs[0, c]) for c in cols]
@@ -146,7 +149,7 @@ def draw_vpa(rows, out_path, predictors=None, blocks=1, title=None, header=None,
     for b, chunk in enumerate(chunks):
         y_pos = np.arange(per_block)[::-1][:len(chunk)]
         for d, dim in enumerate(dims):
-            ax = axes[2 * b + d]
+            ax = axes[nc * b + d]
             order = (predictors or {}).get(dim) or REF_ORDER
             for (label, by_dim), y0 in zip(chunk, y_pos):
                 r = by_dim.get(dim)
@@ -187,7 +190,7 @@ def draw_vpa(rows, out_path, predictors=None, blocks=1, title=None, header=None,
             ax.grid(axis="x", linestyle="--", alpha=0.5)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            ax.set_title(dim, fontsize=17, fontweight="bold", pad=10)
+            ax.set_title(dim, fontsize=col_fontsize, fontweight="bold", pad=10)
             ax.set_xlabel("Adjusted $R^2$", fontsize=13)
             if d == 0:
                 ax.set_yticks(y_pos)
@@ -202,7 +205,7 @@ def draw_vpa(rows, out_path, predictors=None, blocks=1, title=None, header=None,
                for x in refs_leg]
     fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.0 + 0.32 / (per_block + 1)),
                ncol=len(handles), fontsize=12, frameon=True, edgecolor="#CCCCCC")
-    note = "bar = unique adjusted R² (95% scenario-bootstrap CI); β = standardized coefficient in the full model"
+    note = note or "bar = unique adjusted R² (95% scenario-bootstrap CI); β = standardized coefficient in the full model"
     if title:
         fig.suptitle(title, fontsize=14, y=1.0 + 0.62 / (per_block + 1))
     fig.text(0.5, -0.02 - 0.06 / per_block, note, ha="center", fontsize=8.5, color="#666666")

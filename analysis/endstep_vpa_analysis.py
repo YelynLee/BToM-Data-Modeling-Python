@@ -267,7 +267,7 @@ def run_vpa_analysis(condition, exclude_partial, n_boot=1000, seed=0, with_hinds
             scen = np.tile(scen_ids, d[key].shape[0])          # (옵션 x 시나리오)를 펼친 순서와 같음
             results[llm][dim] = vpa_with_ci(y, X, preds[dim], scen, n_boot=n_boot, seed=seed)
 
-    save_dir = out_dir or os.path.join(parent_dir, "results")
+    save_dir = out_dir or os.path.join(parent_dir, "results", "stats", "vpa")
     os.makedirs(save_dir, exist_ok=True)
     tag = f"{condition}{'_hindsight' if with_hindsight else ''}"
     for grp, models, blocks, color in [("Worse", WORSE_MODELS, 2, "#D6006F"), ("Better", BETTER_MODELS, 1, "#5FA318")]:

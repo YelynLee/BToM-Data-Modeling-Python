@@ -266,7 +266,7 @@ def run_overall_vpa_ci(condition, models, n_boot=1000, seed=0, include_irrationa
             y, X, scen = overall_arrays(df_llm, ref_dfs, cols, PREDICTORS[dim], keep)
             by_dim[dim] = vpa_with_ci(y, X, PREDICTORS[dim], scen, n_boot=n_boot, seed=seed)
         rows.append((DISPLAY.get(llm, llm), by_dim))
-    save_dir = out_dir or os.path.join(parent_dir, "results")
+    save_dir = out_dir or os.path.join(parent_dir, "results", "stats", "vpa")
     os.makedirs(save_dir, exist_ok=True)
     base = os.path.join(save_dir, f"vpa_everystep_{condition}{tag}")
     draw_vpa(rows, base + ".png", predictors=PREDICTORS, header=None,
