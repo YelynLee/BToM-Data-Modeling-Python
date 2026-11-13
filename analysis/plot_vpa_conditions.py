@@ -6,7 +6,7 @@
   2) 요약 그림 (belief만): 행 = 모델, 열 = 조건
        vpa_conditions_belief_summary.png
   + 그림에 쓴 값: vpa_conditions.csv
-CI는 compare_stepwise_bootstrap의 2단계 bootstrap(시나리오 → 실행) 결과를 그대로 씀.
+CI는 compare_stepwise_bootstrap 결과를 그대로 씀 (기본: 시나리오 bootstrap. 요약 csv의 bootstrap 열로 확인).
 
 사용 예)
   python analysis/plot_vpa_conditions.py \\
@@ -25,8 +25,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from analysis.vpa_plot import draw_vpa, rows_from_summary, results_to_frame
 
-NOTE = ("bar = unique adjusted R² (95% CI, two-level bootstrap: scenarios, then runs); "
-        "β = standardized coefficient in the full model")
+def note(scheme):
+    return (f"bar = unique adjusted R² (95% CI, {scheme} bootstrap); "
+            "β = standardized coefficient in the full model")
 
 CONDS = ["Every-step", "Every-step-single", "Single-trunc", "Prefix-step"]
 SHORT = {"Every-step": "Every-step", "Every-step-single": "Every-step-single", "Single-trunc": "Single-trunc",
@@ -45,14 +46,17 @@ def main():
     assert len(a.models) == len(a.compare)
     os.makedirs(a.out_dir, exist_ok=True)
 
-    per_model, frames = {}, []
+    per_model, frames, schemes = {}, [], set()
     for m, d in zip(a.models, a.compare):
         s = pd.read_csv(os.path.join(d, "stepwise_bootstrap_summary.csv"))
+        # bootstrap 열이 없는 예전 요약은 2단계 기본값으로 만든 것
+        scheme = s["bootstrap"].iloc[0] if "bootstrap" in s else "two-level (scenarios, then runs)"
+        schemes.add(scheme)
         conds = [c for c in a.conditions if c in set(s.condition)]
         rows = rows_from_summary(s, conds)
         per_model[m] = dict(rows)
         draw_vpa(rows, os.path.join(a.out_dir, f"vpa_conditions_{m.replace(' ', '_')}.png"),
-                 predictors={"Desire": PRED["desire"], "Belief": PRED["belief"]}, title=m, note=NOTE)
+                 predictors={"Desire": PRED["desire"], "Belief": PRED["belief"]}, title=m, note=note(scheme))
         f = results_to_frame(rows)
         f.insert(0, "model", m)
         frames.append(f.rename(columns={"row": "condition"}))
@@ -62,7 +66,8 @@ def main():
     rows = [(m, {SHORT[c]: (per_model[m].get(c) or {}).get("Belief") for c in conds}) for m in a.models]
     draw_vpa(rows, os.path.join(a.out_dir, "vpa_conditions_belief_summary.png"),
              columns=[SHORT[c] for c in conds], predictors={SHORT[c]: PRED["belief"] for c in conds},
-             title="Belief: variance partitioning over all steps, by condition", col_fontsize=14, note=NOTE)
+             title="Belief: variance partitioning over all steps, by condition", col_fontsize=14,
+             note=note(schemes.pop() if len(schemes) == 1 else "mixed: " + " / ".join(sorted(schemes))))
     pd.concat(frames).to_csv(os.path.join(a.out_dir, "vpa_conditions.csv"), index=False)
     print(f"💾 {os.path.join(a.out_dir, 'vpa_conditions.csv')}")
 

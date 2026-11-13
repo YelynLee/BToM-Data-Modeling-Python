@@ -18,8 +18,9 @@ Stepwise 조건(everystep / prefixstep 등) 비교 + 신뢰구간 / 검정.
   4) |LLM - BToM| 평균 절대오차 (belief, 시나리오 평균 후 평균)
 
 신뢰구간
-  - 2단계 bootstrap: 시나리오 복원추출(기본: 층화 없음, --stratified면 행동 그룹별 층화)(모든 조건에 같은 리샘플) ->
-    각 조건 안에서 피험자를 복원추출 (피험자가 1명이면 시나리오만)
+  - 기본: 시나리오 복원추출만 (층화 없음, --stratified면 행동 그룹별 층화)(모든 조건에 같은 리샘플).
+    End-step / Every-step VPA, 논문 Table 4와 같은 방식
+  - --two_level: 위 시나리오 리샘플 뒤 각 조건 안에서 실행(피험자)도 복원추출 (강건성 점검용)
   - 첫 조건 대비 차이: 같은 시나리오 리샘플에서의 차이 분포 -> CI, bootstrap p
 검정 (첫 조건 대비)
   - 시나리오 단위 paired sign-flip 순열 검정: hindsight 지수, |LLM - BToM| (시나리오 평균 차이)
@@ -489,7 +490,9 @@ def main():
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--n_perm", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--no_subject_boot", action="store_true", help="2단계 대신 시나리오만 리샘플")
+    ap.add_argument("--two_level", action="store_true",
+                    help="시나리오 리샘플 뒤 실행(피험자)도 리샘플 (기본: 시나리오만). 강건성 점검용")
+    ap.add_argument("--no_subject_boot", action="store_true", help="(이전 옵션, 지금은 기본값과 같음)")
     ap.add_argument("--match_subjects", type=int, default=0,
                     help="첫 조건에서 k명을 무작위로 뽑아 반복 계산한 분포를 함께 보고 (0이면 안 함)")
     ap.add_argument("--n_match", type=int, default=200)
@@ -533,14 +536,16 @@ def main():
     aggs = [aggregate(a) for a in arrays]
     point = [eng.metrics(g, ones) for g in aggs]
 
-    # 2단계 bootstrap (시나리오 리샘플은 조건 간 공유)
+    # 시나리오 bootstrap (리샘플은 조건 간 공유). --two_level이면 실행도 리샘플
+    boot_scheme = "two-level (scenarios, then runs)" if args.two_level else "scenarios"
+    print(f"bootstrap: {boot_scheme}")
     rng = np.random.default_rng(args.seed + 1)
     B = boot_indices(eng.scen_ids, group_of, args.n_boot, args.seed)
     boots = [[] for _ in arrays]
     for ix in B:
         sw = np.bincount(ix, minlength=eng.n_s).astype(float)
         for j, a in enumerate(arrays):
-            if a.shape[0] > 1 and not args.no_subject_boot:
+            if a.shape[0] > 1 and args.two_level:
                 subj_w = np.bincount(rng.integers(0, a.shape[0], a.shape[0]), minlength=a.shape[0])
                 g = aggregate(a, subj_w)
             else:
@@ -552,7 +557,8 @@ def main():
     for j, (label, pt) in enumerate(zip(args.labels, point)):
         for k, v in pt.items():
             lo, hi = percentile_ci(boots[j][k]) if k in boots[j] else (np.nan, np.nan)
-            out.append(dict(condition=label, n_subjects=arrays[j].shape[0], metric=k, estimate=v, ci_low=lo, ci_high=hi))
+            out.append(dict(condition=label, n_subjects=arrays[j].shape[0], metric=k, estimate=v, ci_low=lo, ci_high=hi,
+                            bootstrap=boot_scheme))
     # 첫 조건 대비 차이
     sc0 = eng.scenario_level(aggs[0])
     perm_rows = []
