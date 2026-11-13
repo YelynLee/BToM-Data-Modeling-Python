@@ -52,7 +52,7 @@ def vpa_point(y, X, names):
     return out
 
 
-def vpa_with_ci(y, X, names, scen, n_boot=1000, seed=0):
+def vpa_with_ci(y, X, names, scen, n_boot=2000, seed=0):
     """시나리오 단위 bootstrap (층화 없음). 반환: {'total': (est, lo, hi), 'unique': {ref: (est, lo, hi)}, 'beta': {...}}"""
     est = vpa_point(y, X, names)
     if est is None:
