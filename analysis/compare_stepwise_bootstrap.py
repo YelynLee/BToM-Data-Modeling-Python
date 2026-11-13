@@ -370,49 +370,13 @@ PVPA_XLAB = {3: "See G2", 4: "Stop", 5: "Return G1 /\nAppr G2", 6: "Selected"}
 
 
 def plot_vpa_full(res, labels, n_subjects, out_path, n_scen):
-    """전체 스텝 VPA. 행: desire / belief, 열: 조건. 막대: 고유 adjusted R² (95% CI), 오른쪽 숫자: 표준화 β"""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, len(labels), figsize=(4.6 * len(labels), 6.4), squeeze=False)
-    for r, score in enumerate(("desire", "belief")):
-        refs = PVPA_PRED[score]
-        xmax = 0
-        for c, lab in enumerate(labels):
-            ax = axes[r, c]
-            sub = res[res["condition"] == lab].set_index("metric")
-            for i, ref in enumerate(refs):
-                k = f"vpa_{score}_unique_{ref}"
-                if k not in sub.index or pd.isna(sub.loc[k, "estimate"]):
-                    ax.text(0.002, i, "constant (dropped)", va="center", fontsize=8, color="#999999")
-                    continue
-                est, lo, hi = sub.loc[k, ["estimate", "ci_low", "ci_high"]]
-                ax.barh(i, est, color=PVPA_COLORS[ref], height=0.62)
-                ax.plot([lo, hi], [i, i], color="#333333", lw=1.3)
-                b = sub["estimate"].get(f"vpa_{score}_beta_{ref}", np.nan)
-                ax.text(1.0, i, f"β {b:+.2f}", transform=ax.get_yaxis_transform(), ha="left", va="center",
-                        fontsize=8.5, color="#C0392B" if b < 0 else "#333333")
-                xmax = max(xmax, hi if pd.notna(hi) else est)
-            tot = sub["estimate"].get(f"vpa_{score}_total", np.nan)
-            ax.set_yticks(range(len(refs)))
-            ax.set_yticklabels([PVPA_NAMES[x] for x in refs] if c == 0 else [], fontsize=9.5)
-            ax.invert_yaxis()
-            ax.axvline(0, color="#999999", lw=0.8)
-            ax.grid(axis="x", color="#EEEEEE", lw=0.6)
-            for sp in ("top", "right"):
-                ax.spines[sp].set_visible(False)
-            head = f"{lab}\n({n_subjects[c]} subjects)\n\n" if r == 0 else ""
-            ax.set_title(f"{head}{score.capitalize()} · total adj. R² = {tot:.2f}", fontsize=10.5, loc="center")
-            if r == 1:
-                ax.set_xlabel("Unique adjusted R²", fontsize=9.5)
-        for c in range(len(labels)):
-            axes[r, c].set_xlim(min(-0.02, axes[r, c].get_xlim()[0]), xmax * 1.08 + 0.01)
-    fig.suptitle(f"Variance partitioning over all steps ({n_scen} scenarios, 95% bootstrap CI; "
-                 "β = standardized coefficient, red = negative)", fontsize=12, y=1.01)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"✅ saved: {out_path}")
+    """전체 스텝 VPA. 논문 VPA 그림(Fig 4b, 5b, S3)과 같은 디자인 (analysis/vpa_plot.py).
+    행 = 조건(또는 모델), 열 = desire / belief. 막대 = 고유 adjusted R² (95% CI), 오른쪽 = 표준화 β, 행 위 = total adj. R²"""
+    from analysis.vpa_plot import draw_vpa, rows_from_summary
+    rows = rows_from_summary(res, labels)
+    rows = [(f"{lab} ({n})" if len(set(n_subjects)) > 1 else lab, bd) for (lab, bd), n in zip(rows, n_subjects)]
+    preds = {"Desire": PVPA_PRED["desire"], "Belief": PVPA_PRED["belief"]}
+    draw_vpa(rows, out_path, predictors=preds, title=f"Variance partitioning over all steps ({n_scen} scenarios)")
 
 
 def plot_phase_vpa(res, labels, n_subjects, out_path, title=None, kind="unique"):

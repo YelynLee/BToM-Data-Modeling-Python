@@ -4,7 +4,10 @@ import argparse
 import pickle
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
+try:
+    import statsmodels.api as sm   # 기존 calculate_* 함수에서만 사용
+except ImportError:
+    sm = None
 from scipy.stats import zscore
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -18,7 +21,7 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from src.config import BASE_RESULTS_DIR
+from src.config import BASE_RESULTS_DIR, get_group_indices
 from src.prepare_everystep import load_reference_everystep
 from analysis.plot_everystep import get_phase_index
 
@@ -229,6 +232,48 @@ def draw_stepwise_overall_vpa(master_results, condition, save_dir):
     plt.close()
     print(f"\n📊 Overall Everystep VPA plot saved to: {save_path}")
 
+
+DISPLAY = {'gpt-5.4': 'GPT-5.4', 'o4-mini': 'GPT-o4-mini', 'gemini-2.5-flash': 'Gemini-2.5-Flash',
+           'claude-sonnet-4-6': 'Claude-4.6-Sonnet', 'gemini-2.5-pro': 'Gemini-2.5-Pro',
+           'deepseek-reasoner': 'DeepSeek-R1', 'deepseek-v4-pro': 'DeepSeek-V4-Pro', 'claude-opus-4-6': 'Claude-4.6-Opus'}
+
+
+def overall_arrays(df_llm, ref_dfs, target_cols, refs, keep_scen):
+    """(시나리오 x 스텝 x 옵션)을 펼친 y, X, 시나리오 id. keep_scen 밖의 시나리오는 제외."""
+    d = df_llm[df_llm['scenario_id'].isin(keep_scen)]
+    y_long = d.melt(id_vars=['scenario_id', 'time_step'], value_vars=target_cols, var_name='opt', value_name='LLM')
+    for r in refs:
+        m = ref_dfs[r].melt(id_vars=['scenario_id', 'time_step'], value_vars=target_cols, var_name='opt', value_name=r)
+        y_long = y_long.merge(m, on=['scenario_id', 'time_step', 'opt'], how='left')
+    y_long = y_long.dropna()
+    return y_long['LLM'].to_numpy(float), y_long[refs].to_numpy(float), y_long['scenario_id'].to_numpy()
+
+
+def run_overall_vpa_ci(condition, models, n_boot=1000, seed=0, include_irrational=False, out_dir=None, tag=""):
+    """논문 Fig 5b 디자인 + CI, β, total adj. R² (모든 스텝을 합친 VPA)."""
+    from analysis.vpa_plot import vpa_with_ci, draw_vpa, results_to_frame
+    keep = sorted(s for g in get_group_indices(include_irrational=include_irrational) for s in g)
+    ref_dfs = {r: load_reference_everystep(r) for r in ALL_REFS}
+    rows = []
+    for llm in models:
+        df_llm = load_llm_everystep(llm, condition)
+        if df_llm is None:
+            print(f"⚠️ {llm}: everystep_valid_only.csv 없음")
+            continue
+        print(f"⏳ {llm}")
+        by_dim = {}
+        for dim, cols in TARGETS.items():
+            y, X, scen = overall_arrays(df_llm, ref_dfs, cols, PREDICTORS[dim], keep)
+            by_dim[dim] = vpa_with_ci(y, X, PREDICTORS[dim], scen, n_boot=n_boot, seed=seed)
+        rows.append((DISPLAY.get(llm, llm), by_dim))
+    save_dir = out_dir or os.path.join(parent_dir, "results")
+    os.makedirs(save_dir, exist_ok=True)
+    base = os.path.join(save_dir, f"vpa_everystep_{condition}{tag}")
+    draw_vpa(rows, base + ".png", predictors=PREDICTORS, header=None,
+             title=f"Every-step condition ({len(keep)} scenarios)")
+    results_to_frame(rows).to_csv(base + ".csv", index=False)
+    print(f"💾 {base}.csv")
+
 # =========================================================================
 # 🌟 [Main] 분석 실행 및 데이터 저장
 # =========================================================================
@@ -312,8 +357,18 @@ def run_stepwise_vpa(condition):
     print(f"💾 All Stepwise VPA results successfully saved to: {pkl_save_path}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Stepwise VPA Analysis.")
+    parser = argparse.ArgumentParser(description="Every-step VPA. 기본: 논문 Fig 5b 디자인(+CI, β, total R²). "
+                                                 "--legacy: 기존 그림과 phase 누적 결과(plot_everystep --vpa용) 생성")
     parser.add_argument("--condition", type=str, default="vanilla", help="Experiment condition")
+    parser.add_argument("--models", nargs="+", default=BETTER_MODELS, help="기본: Better 4개 (논문 Fig 5b)")
+    parser.add_argument("--n_boot", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--include_irrational", action="store_true", help="irrational 5개 포함(78개, 기존 그림과 같은 기준)")
+    parser.add_argument("--out_dir", default=None)
+    parser.add_argument("--legacy", action="store_true")
     args = parser.parse_args()
-    
-    run_stepwise_vpa(args.condition)
+
+    if args.legacy:
+        run_stepwise_vpa(args.condition)
+    else:
+        run_overall_vpa_ci(args.condition, args.models, args.n_boot, args.seed, args.include_irrational, args.out_dir)
