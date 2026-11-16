@@ -1,7 +1,7 @@
 """
 리뷰어 응답용 그림 / 표 (모델 여러 개를 한 그림에 비교).
 
-  R1 : Every-step / Every-step-single / Prefix-step 분해 (1×4)
+  R1 : Every-step / Every-step-single / Single-trunc / Prefix-step 분해 (1×4). 없는 조건은 건너뜀
        (a) hindsight 지수  (b) 마지막 스텝 belief r(같은 모델 End-step)
        (c) 마지막 스텝 belief r(사람) + End-step  (d) 판단당 생성 토큰
   S1 : 주요 지표 표 (조건별 추정치 [95% CI], Every-step 대비 차이 [CI], bootstrap p, 순열 p)
@@ -43,8 +43,8 @@ from stats_utils import boot_indices, set_stratified, percentile_ci
 # 기준 팔레트(dataviz 기본 categorical 1, 2번) — 모델 순서대로 고정
 MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 INK, INK2, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
-CONDS = ["Every-step", "Every-step-single", "Prefix-step"]
-COND_SHORT = {"Every-step": "Every-step", "Every-step-single": "Every-step\n-single",
+CONDS = ["Every-step", "Every-step-single", "Single-trunc", "Prefix-step"]
+COND_SHORT = {"Every-step": "Every-step", "Every-step-single": "Every-step\n-single", "Single-trunc": "Single-trunc",
               "Prefix-step": "Prefix-step", "End-step": "End-step"}
 
 plt.rcParams.update({"font.size": 10, "axes.edgecolor": INK2, "axes.labelcolor": INK, "xtick.color": INK2,
@@ -64,78 +64,72 @@ def _offsets(n, width=0.22):
 # R1
 # =========================================================================
 def fig_r1(models, compare_dirs, out):
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4.1))
+    """조건 4개(Every-step, Every-step-single, Single-trunc, Prefix-step). 모델에 없는 조건은 건너뜀."""
+    n = len(CONDS)
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.1))
     offs = _offsets(len(models))
+
+    def draw(ax, xs, vals, lo, hi, col, label=None, connect=None):
+        ok = [i for i, v in enumerate(vals) if v is not None and np.isfinite(v)]
+        cx = [i for i in ok if connect is None or i in connect]
+        ax.plot([xs[i] for i in cx], [vals[i] for i in cx], color=col, lw=1.4, alpha=0.6, zorder=2)
+        ax.errorbar([xs[i] for i in ok], [vals[i] for i in ok],
+                    yerr=[[vals[i] - lo[i] for i in ok], [hi[i] - vals[i] for i in ok]], fmt="o", color=col, ms=7,
+                    capsize=0, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3, label=label)
+
+    def get(df, c, col, lo, hi):
+        if c not in df.index:
+            return None, None, None
+        r = df.loc[c]
+        return r[col], r[lo], r[hi]
+
     for mi, (name, d) in enumerate(zip(models, compare_dirs)):
         col = MODEL_COLORS[mi]
         s = pd.read_csv(os.path.join(d, "stepwise_bootstrap_summary.csv"))
         f = pd.read_csv(os.path.join(d, "final_step.csv"))
         t = pd.read_csv(os.path.join(d, "tokens.csv"))
-
-        # (a) hindsight index
-        rows = [s[(s.condition == c) & (s.metric == "hindsight_index")].iloc[0] for c in CONDS]
-        x = np.arange(len(CONDS)) + offs[mi]
-        est = [r.estimate for r in rows]
-        axes[0].plot(x, est, color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[0].errorbar(x, est, yerr=[[e - r.ci_low for e, r in zip(est, rows)], [r.ci_high - e for e, r in zip(est, rows)]],
-                         fmt="o", color=col, ms=7, capsize=0, elinewidth=2, markeredgecolor="white",
-                         markeredgewidth=1.2, zorder=3, label=name)
-
-        # (b) final-step belief r(human) incl. End-step
-        conds_b = CONDS + ["End-step"]
+        x = np.arange(n) + offs[mi]
+        hs = s[s.metric == "hindsight_index"].drop_duplicates("condition").set_index("condition")
+        v = [get(hs, c, "estimate", "ci_low", "ci_high") for c in CONDS]
+        draw(axes[0], x, *zip(*v), col, label=name)
+        fe = f[(f.dimension == "belief") & (f.versus == "End-step")].set_index("condition")
+        draw(axes[1], x, *zip(*[get(fe, c, "r", "ci_low", "ci_high") for c in CONDS]), col)
         fb = f[(f.dimension == "belief") & (f.versus == "Human")].set_index("condition")
-        xb = np.arange(len(conds_b)) + offs[mi]
-        eb = [fb.loc[c, "r"] for c in conds_b]
-        lo = [fb.loc[c, "r"] - fb.loc[c, "ci_low"] for c in conds_b]
-        hi = [fb.loc[c, "ci_high"] - fb.loc[c, "r"] for c in conds_b]
-        axes[2].plot(xb[:3], eb[:3], color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[2].errorbar(xb, eb, yerr=[lo, hi], fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white",
-                         markeredgewidth=1.2, zorder=3)
+        conds_b = CONDS + ["End-step"]
+        xb = np.arange(n + 1) + offs[mi]
+        draw(axes[2], xb, *zip(*[get(fb, c, "r", "ci_low", "ci_high") for c in conds_b]), col, connect=range(n))
         if mi == 0 and "BToM" in fb.index:
             axes[2].axhline(fb.loc["BToM", "r"], color=INK2, ls="--", lw=1, zorder=1)
             axes[2].text(-0.35, fb.loc["BToM", "r"] + 0.03, "BToM–human", color=INK2, fontsize=8.5, ha="left")
-
-        # (c) final-step belief r(own End-step); Prefix-step at t = T uses the End-step prompt (= reliability)
-        fe = f[(f.dimension == "belief") & (f.versus == "End-step")].set_index("condition")
-        ee = [fe.loc[c, "r"] for c in CONDS]
-        axes[1].plot(x, ee, color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[1].errorbar(x, ee, yerr=[[fe.loc[c, "r"] - fe.loc[c, "ci_low"] for c in CONDS],
-                                      [fe.loc[c, "ci_high"] - fe.loc[c, "r"] for c in CONDS]],
-                         fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3)
-
-        # (d) tokens per judgement (median, p10–p90)
         tj = t[t.metric == "gen_per_judgement"].set_index("condition")
-        med = [tj.loc[c, "median"] for c in CONDS]
-        axes[3].plot(x, med, color=col, lw=1.4, alpha=0.6, zorder=2)
-        axes[3].errorbar(x, med, yerr=[[m - tj.loc[c, "p10"] for m, c in zip(med, CONDS)],
-                                       [tj.loc[c, "p90"] - m for m, c in zip(med, CONDS)]],
-                         fmt="o", color=col, ms=7, elinewidth=2, markeredgecolor="white", markeredgewidth=1.2, zorder=3)
+        draw(axes[3], x, *zip(*[get(tj, c, "median", "p10", "p90") for c in CONDS]), col)
 
+    labels = [COND_SHORT[c] for c in CONDS]
     ax = axes[0]
     ax.axhline(0, color=INK2, lw=1)
     ax.axhline(1, color=INK2, lw=1, ls="--")
-    ax.text(2.45, 0.05, "BToM", color=INK2, fontsize=8.5, ha="right")
-    ax.text(2.45, 1.05, "Hindsight", color=INK2, fontsize=8.5, ha="right")
-    ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
+    ax.text(n - 0.55, 0.05, "BToM", color=INK2, fontsize=8.5, ha="right")
+    ax.text(1.5, 1.05, "Hindsight", color=INK2, fontsize=8.5, ha="center")
+    ax.set_xticks(range(n), labels)
     ax.set_ylabel("Hindsight index (belief)")
     ax.set_title("(a) Hindsight index", loc="left", fontsize=11)
-    ax = axes[2]
-    ax.axhline(0, color=INK2, lw=1)
-    ax.set_xticks(range(4), [COND_SHORT[c] for c in CONDS + ["End-step"]])
-    ax.set_ylabel("r with human (belief, t = T)")
-    ax.set_ylim(-0.3, 1.0)
-    ax.set_title("(c) Agreement with human ratings", loc="left", fontsize=11)
     ax = axes[1]
     ax.axhline(0, color=INK2, lw=1)
-    ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
+    ax.set_xticks(range(n), labels)
     ax.set_ylabel("r with own End-step (belief, t = T)")
     ax.set_ylim(-0.5, 1.0)
     ax.set_title("(b) Agreement with own End-step ratings", loc="left", fontsize=11)
-    ax.text(2.45, -0.46, "Prefix-step at t = T = End-step prompt\n(run-to-run reliability)", color=INK2,
+    ax.text(n - 0.55, -0.46, "Prefix-step at t = T = End-step prompt\n(run-to-run reliability)", color=INK2,
             fontsize=8, ha="right", va="bottom")
+    ax = axes[2]
+    ax.axhline(0, color=INK2, lw=1)
+    ax.set_xticks(range(n + 1), labels + [COND_SHORT["End-step"]])
+    ax.set_ylabel("r with human (belief, t = T)")
+    ax.set_ylim(-0.3, 1.0)
+    ax.set_title("(c) Agreement with human ratings", loc="left", fontsize=11)
     ax = axes[3]
     ax.set_yscale("log")
-    ax.set_xticks(range(len(CONDS)), [COND_SHORT[c] for c in CONDS])
+    ax.set_xticks(range(n), labels)
     ax.set_ylabel("Generated tokens per judgement")
     ax.set_title("(d) Compute per judgement (median, 10–90%)", loc="left", fontsize=11)
     for a in axes:
