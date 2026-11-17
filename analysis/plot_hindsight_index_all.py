@@ -17,7 +17,26 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-C_BETTER, C_WORSE = "#2A6FDB", "#B5B3AA"
+C_BETTER, C_WORSE = "#60A917", "#D80073"   # 논문 Figure 3의 Better / Worse 색
+
+
+def current_belief_index():
+    """agent의 현재 belief(Spot 2가 보인 뒤 참에 확신, 그 전에는 BToM)를 평정으로 넣었을 때의 hindsight index.
+    Spot 2가 보이기 전에는 Hindsight = BToM이라 지수에서 빠지므로 TrueBelief 레퍼런스로 계산한 값과 같음."""
+    import sys, io, contextlib
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for q in (root, os.path.join(root, "analysis"), os.path.join(root, "src")):
+        if q not in sys.path:
+            sys.path.insert(0, q)
+    import numpy as np
+    with contextlib.redirect_stdout(io.StringIO()):
+        import compare_stepwise_bootstrap as C
+        allowed = C.get_group_indices(include_irrational=False)
+        scen = sorted(s for g in range(1, 8) for s in allowed[g - 1])
+        rows = C.row_table(scen)
+        refs = C.ref_arrays(rows, {r: C.load_reference_everystep(r) for r in C.ALL_REFS})
+        eng = C.Engine(rows, refs)
+    return float(np.nanmean(eng.hindsight_by_scenario(refs["truebelief"], np.ones(len(rows), bool))))
 
 
 def main():
@@ -25,7 +44,9 @@ def main():
     ap.add_argument("--summary", required=True)
     ap.add_argument("--better", nargs="+", required=True, help="Better 그룹 모델 이름 (summary의 condition 값)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--no_current_belief", action="store_true", help="현재 belief 기준선을 그리지 않음")
     a = ap.parse_args()
+    cb = None if a.no_current_belief else current_belief_index()
     s = pd.read_csv(a.summary)
     h = s[(s.metric == "hindsight_index") & ~s.condition.str.contains(" - ")].drop_duplicates("condition")
     h = h.sort_values("estimate", ascending=False).reset_index(drop=True)
@@ -39,6 +60,11 @@ def main():
     n = len(h)
     ax.text(n - 0.45, 1, "Hindsight\nmodel", color="#E63946", fontsize=6.5, ha="left", va="center", clip_on=False)
     ax.text(n - 0.45, 0, "BToM", color="#333", fontsize=6.5, ha="left", va="center", clip_on=False)
+    if cb is not None:
+        ax.axhline(cb, color="#555555", lw=0.9, ls=":")
+        ax.text(n - 0.45, cb, f"Current\nbelief ({cb:.2f})", color="#555555", fontsize=6.5, ha="left", va="center",
+                clip_on=False)
+        ax.set_ylim(-0.1, max(3.45, h.ci_high.max() + 0.1))
     ax.set_xticks(range(n))
     ax.set_xticklabels([c.replace("-", "-\n", 1) for c in h.condition], fontsize=6)
     ax.set_xlim(-0.6, n - 0.5)
@@ -51,10 +77,11 @@ def main():
     ax.set_axisbelow(True)
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color=C_BETTER, label="Better-performing"), Patch(color=C_WORSE, label="Lower-performing")],
-              fontsize=6.5, frameon=False, loc="upper right")
+              fontsize=6.5, frameon=False, loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2)
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     fig.savefig(a.out, dpi=300, bbox_inches="tight")
-    h[["condition", "estimate", "ci_low", "ci_high"]].to_csv(os.path.splitext(a.out)[0] + ".csv", index=False)
+    h = h.assign(group=["better" if c in a.better else "lower" for c in h.condition], current_belief_index=cb)
+    h[["condition", "group", "estimate", "ci_low", "ci_high", "current_belief_index"]].to_csv(os.path.splitext(a.out)[0] + ".csv", index=False)
     print("saved", a.out)
 
 
