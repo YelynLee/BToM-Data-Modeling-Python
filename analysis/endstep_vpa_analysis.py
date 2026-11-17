@@ -238,7 +238,7 @@ DISPLAY = {'gpt-4o': 'GPT-4o', 'gpt-5.4': 'GPT-5.4', 'o4-mini': 'GPT-o4-mini', '
            'deepseek-reasoner': 'DeepSeek-R1', 'deepseek-v4-pro': 'DeepSeek-V4-Pro', 'claude-opus-4-6': 'Claude-4.6-Opus'}
 
 
-def run_vpa_analysis(condition, exclude_partial, n_boot=1000, seed=0, with_hindsight=False, out_dir=None):
+def run_vpa_analysis(condition, exclude_partial, n_boot=2000, seed=0, with_hindsight=False, out_dir=None):
     """논문 Fig 4b(Worse) / Fig S3(Better)과 같은 디자인 + CI, β, total adj. R²."""
     from analysis.vpa_plot import vpa_with_ci, draw_vpa, results_to_frame
 
@@ -287,7 +287,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-step VPA (Fig 4b: Worse, Fig S3: Better) with CI, beta, total R2.")
     parser.add_argument("--condition", type=str, default="vanilla", help="Experiment condition")
     parser.add_argument("--exclude_partial", action="store_true", help="Exclude Check-Partial groups")
-    parser.add_argument("--n_boot", type=int, default=1000)
+    parser.add_argument("--n_boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--with_hindsight", action="store_true", help="belief에 Hindsight 예측변수 추가 (논문은 제외)")
     parser.add_argument("--out_dir", default=None)

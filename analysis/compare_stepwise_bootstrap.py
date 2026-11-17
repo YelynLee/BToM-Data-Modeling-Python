@@ -338,8 +338,8 @@ def plot_summary(res, labels, out_path, title):
                     continue
                 r = row.iloc[0]
                 y = i + (j - (n - 1) / 2) * 0.22
-                ax.plot([r["ci_low"], r["ci_high"]], [y, y], color=COND_COLORS[j], lw=2, solid_capstyle="round")
-                ax.plot(r["estimate"], y, "o", color=COND_COLORS[j], ms=8, markeredgecolor="white",
+                ax.plot([r["ci_low"], r["ci_high"]], [y, y], color=COND_COLORS[j % len(COND_COLORS)], lw=2, solid_capstyle="round")
+                ax.plot(r["estimate"], y, "o", color=COND_COLORS[j % len(COND_COLORS)], ms=8, markeredgecolor="white",
                         markeredgewidth=1.5, label=lab if i == 0 else None, zorder=3)
         ax.axvline(0, color="#999999", lw=0.8, zorder=0)
         if "Hindsight index" in ptitle:

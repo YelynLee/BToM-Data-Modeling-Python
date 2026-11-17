@@ -83,7 +83,7 @@ def main():
     ap.add_argument("--runs", nargs="+", required=True)
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--heatmap_condition", default="Prefix-step")
-    ap.add_argument("--n_boot", type=int, default=1000)
+    ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     rng = np.random.default_rng(a.seed)
@@ -111,7 +111,7 @@ def main():
             v = np.abs(d[mask]).mean(axis=1)
             sc = scen[mask]
             per = pd.Series(v).groupby(sc).mean()
-            bs = [per.reindex(b).mean() for b in boot[:300]]
+            bs = [per.reindex(b).mean() for b in boot]
             mag.append(dict(model=model, condition=cond, dimension=dim, source=src, phase_idx=ph,
                             mean_abs_delta=per.mean(), ci_low=np.nanpercentile(bs, 2.5), ci_high=np.nanpercentile(bs, 97.5)))
 

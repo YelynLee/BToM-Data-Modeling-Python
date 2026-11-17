@@ -249,7 +249,7 @@ def overall_arrays(df_llm, ref_dfs, target_cols, refs, keep_scen):
     return y_long['LLM'].to_numpy(float), y_long[refs].to_numpy(float), y_long['scenario_id'].to_numpy()
 
 
-def run_overall_vpa_ci(condition, models, n_boot=1000, seed=0, include_irrational=False, out_dir=None, tag=""):
+def run_overall_vpa_ci(condition, models, n_boot=2000, seed=0, include_irrational=False, out_dir=None, tag=""):
     """논문 Fig 5b 디자인 + CI, β, total adj. R² (모든 스텝을 합친 VPA)."""
     from analysis.vpa_plot import vpa_with_ci, draw_vpa, results_to_frame
     keep = sorted(s for g in get_group_indices(include_irrational=include_irrational) for s in g)
@@ -361,7 +361,7 @@ if __name__ == "__main__":
                                                  "--legacy: 기존 그림과 phase 누적 결과(plot_everystep --vpa용) 생성")
     parser.add_argument("--condition", type=str, default="vanilla", help="Experiment condition")
     parser.add_argument("--models", nargs="+", default=BETTER_MODELS, help="기본: Better 4개 (논문 Fig 5b)")
-    parser.add_argument("--n_boot", type=int, default=1000)
+    parser.add_argument("--n_boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--include_irrational", action="store_true", help="irrational 5개 포함(78개, 기존 그림과 같은 기준)")
     parser.add_argument("--out_dir", default=None)

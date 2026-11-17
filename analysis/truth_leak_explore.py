@@ -36,11 +36,9 @@ SEGMENTS = {"pre": "before Spot 2 visible (t < t_vis)", "post": "after Spot 2 vi
 
 
 def load_ratings(path):
-    if path.endswith(".csv"):
-        d = pd.read_csv(path)
-    else:
-        d = pd.concat([pd.read_csv(f).assign(subject_id=i)
-                       for i, f in enumerate(sorted(glob.glob(os.path.join(path, "subject_*.csv"))))])
+    # compare_stepwise_bootstrap과 같은 로더: 오류 행 제외, 시나리오를 끝까지 응답한 (실행, 시나리오)만 사용
+    from analysis.compare_stepwise_bootstrap import load_rows
+    d = load_rows(path)
     cols = [f"belief_{o}" for o in OPT]
     m = d.dropna(subset=cols).groupby(["scenario_id", "time_step"])[cols].mean()
     x = np.maximum(m.values - 1, 0)
