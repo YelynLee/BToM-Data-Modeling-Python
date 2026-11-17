@@ -32,11 +32,16 @@ def main():
     ap.add_argument("--dir", required=True)
     ap.add_argument("--better", nargs="+", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--only_a", action="store_true", help="곡선 패널 (a)만 그림 (논문 부록용)")
     a = ap.parse_args()
     C = pd.read_csv(os.path.join(a.dir, "lambda_curves.csv"))
     F = pd.read_csv(os.path.join(a.dir, "lambda_fit.csv")).sort_values("r_at_hat", ascending=False)
     markers = ["o", "s", "^", "D"]
-    fig, (ax, bx) = plt.subplots(1, 2, figsize=(9.6, 3.1), gridspec_kw=dict(width_ratios=[1.25, 1]))
+    if a.only_a:
+        fig, ax = plt.subplots(figsize=(5.4, 3.0))
+        bx = None
+    else:
+        fig, (ax, bx) = plt.subplots(1, 2, figsize=(9.6, 3.1), gridspec_kw=dict(width_ratios=[1.25, 1]))
 
     # (a) 곡선
     ib = iw = 0
@@ -61,10 +66,20 @@ def main():
     ax.set_ylabel("r(ratings, Hindsight$_\\lambda$), belief", fontsize=8)
     ax.set_ylim(-0.35, 1.02)
     ax.tick_params(labelsize=7)
-    ax.set_title("(a) Fit across λ", fontsize=8.5, loc="left")
+    if not a.only_a:
+        ax.set_title("(a) Fit across λ", fontsize=8.5, loc="left")
     ax.legend(fontsize=6, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=4)
 
     # (b) 모델별 요약
+    if a.only_a:
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        ax.grid(color="#eeeeee", lw=0.5)
+        ax.set_axisbelow(True)
+        fig.tight_layout()
+        fig.savefig(a.out or os.path.join(a.dir, "lambda_curves_a.png"), dpi=300, bbox_inches="tight")
+        print("saved")
+        return
     y = np.arange(len(F))[::-1]
     for yi, (_, r) in zip(y, F.iterrows()):
         col = C_BETTER if r.run in a.better else C_WORSE
