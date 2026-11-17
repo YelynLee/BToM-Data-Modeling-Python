@@ -35,7 +35,8 @@ for q in (ROOT, os.path.join(ROOT, "analysis"), os.path.join(ROOT, "src")):
     if q not in sys.path:
         sys.path.insert(0, q)
 
-LAMS = np.r_[0, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+LAMS = np.r_[0, 0.25, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128, 256, 512, 1024, np.inf]
+# np.inf = 극한: Spot 2가 보인 뒤 참 세계 확률이 가장 큰 초기 belief 점에만 질량 (현재 belief에 해당)
 BEL = ["belief_L", "belief_M", "belief_Empty"]
 
 
@@ -84,7 +85,10 @@ def belief_marg(post, lam0, lam):
         B = []
         for t, lp in enumerate(d["logp"]):
             if t + 1 >= d["tvis"] and t + 1 > 1:
-                lp = lp + (lam - lam0) * lt
+                if np.isinf(lam):
+                    lp = np.where(lt >= lt.max() - 1e-9, lp, -np.inf)
+                else:
+                    lp = lp + (lam - lam0) * lt
             p = np.exp(lp - logsumexp(lp))
             B.append(p @ d["pts"])
         res.append(np.array(B).T)
@@ -113,6 +117,12 @@ class Aligner:
     def ratings(self, path):
         arr, _ = self.C.subject_array(self.C.load_rows(path), self.rows)
         return self.C.aggregate(arr)[:, self.C.BEL]
+
+
+def first_max(rs, tol=1e-3):
+    """r이 최댓값과 tol 이내인 가장 작은 λ의 인덱스 (포화 구간의 동점 처리)."""
+    rs = np.asarray(rs)
+    return int(np.argmax(rs >= np.nanmax(rs) - tol))
 
 
 def pooled_r(a, p, idx=None):
@@ -152,12 +162,12 @@ def main():
         for b in boot:
             ix = np.concatenate([pos[s] for s in b])
             yy = y[ix]
-            lam_b.append(LAMS[int(np.argmax([pooled_r(yy, preds[l][ix]) for l in LAMS]))])
+            lam_b.append(LAMS[first_max([pooled_r(yy, preds[l][ix]) for l in LAMS])])
         lam_b = np.array(lam_b)
-        best = LAMS[int(np.argmax(rs))]
+        best = LAMS[first_max(rs)]
         fits.append(dict(run=name, beta=beta, lambda_hat=best, r_at_hat=rs.max(), r_at_lambda2=rs[list(LAMS).index(2)],
-                         r_at_lambda0=rs[0], ci_low=np.percentile(lam_b, 2.5), ci_high=np.percentile(lam_b, 97.5),
-                         share_at_upper_bound=np.mean(lam_b == LAMS[-1])))
+                         r_at_lambda0=rs[0], ci_low=np.quantile(lam_b, 0.025, method='inverted_cdf'), ci_high=np.quantile(lam_b, 0.975, method='inverted_cdf'),
+                         r_at_inf=rs[-1], share_boot_ge_128=np.mean(lam_b >= 128)))
         print(f"{name}: λ̂ = {best} (r = {rs.max():.3f}; λ=2: {rs[list(LAMS).index(2)]:.3f}), "
               f"95% CI [{np.percentile(lam_b, 2.5)}, {np.percentile(lam_b, 97.5)}]")
     if a.human:
@@ -177,12 +187,13 @@ def main():
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(5.2, 3.2))
     for name, g in C.groupby("run", sort=False):
-        ax.plot(g.lam + 0.1, g.r, marker="o", ms=3, lw=1.3, label=name)
+        x = np.where(np.isinf(g.lam), 4096, g.lam) + 0.1
+        ax.plot(x, g.r, marker="o", ms=3, lw=1.3, label=name)
     ax.axvline(2.1, color="#888", ls="--", lw=0.8)
     ax.text(2.2, ax.get_ylim()[0] + 0.02, "λ = 2 (paper)", fontsize=7, color="#555")
     ax.set_xscale("log")
-    ax.set_xticks([0.1, 0.35, 0.6, 1.1, 2.1, 4.1, 8.1, 16.1, 32.1, 64.1])
-    ax.set_xticklabels(["0", "0.25", "0.5", "1", "2", "4", "8", "16", "32", "64"], fontsize=7)
+    ax.set_xticks([0.1, 0.6, 2.1, 8.1, 32.1, 128.1, 1024.1, 4096.1])
+    ax.set_xticklabels(["0", "0.5", "2", "8", "32", "128", "1024", "∞"], fontsize=7)
     ax.set_xlabel("λ (Hindsight weight on the revealed state)", fontsize=8)
     ax.set_ylabel("r(ratings, Hindsight$_\\lambda$), belief", fontsize=8)
     ax.tick_params(labelsize=7)
