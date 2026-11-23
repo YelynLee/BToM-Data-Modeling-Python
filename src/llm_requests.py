@@ -49,6 +49,54 @@ def provider_of(model_name):
 BATCH_PROVIDERS = ("claude", "openai_responses", "openai_chat", "gemini")
 
 
+
+# =========================================================================
+# DeepSeek (V4 이후 API, 2026-07-24 deepseek-chat / deepseek-reasoner 폐지)
+# =========================================================================
+# 지금 API 모델: deepseek-flash (V4.1-Flash), deepseek-v4-pro (V4-Pro GA, 2026-08-13).
+# 두 모델 모두 thinking이 기본으로 켜져 있음(effort high). 예전 모델과 대응:
+#   deepseek-chat(비추론)     -> deepseek-flash --thinking off
+#   deepseek-reasoner(추론)   -> deepseek-flash --thinking on (또는 기본값)
+# thinking 모드에서는 temperature가 무시되므로(오류 없이 효과 없음) 기록도 None으로 남김.
+DEEPSEEK_EFFORTS = {"none": None, "minimal": "low", "low": "low", "medium": "high", "high": "high",
+                    "xhigh": "high", "max": "max"}
+
+
+def deepseek_request(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None):
+    """DeepSeek Chat Completions 요청 body와 기록용 meta.
+
+    thinking: "default"(API 기본 = 켜짐) | "on" | "off". 옛 이름(deepseek-chat/-reasoner)은 예전 방식 그대로.
+    effort  : thinking이 켜진 경우 reasoning_effort (low/high/max; 다른 이름은 API 규칙대로 대응).
+    Returns: (body: dict, extra_body: dict, meta: dict)
+    """
+    m = model_name.lower()
+    legacy = m in ("deepseek-chat", "deepseek-reasoner")
+    temp = temperature if temperature is not None else TEMPERATURE_DEFAULT
+    body = {"model": model_name,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_prompt}]}
+    extra = {}
+    if legacy:
+        on = m == "deepseek-reasoner"
+        body["temperature"] = temp
+        if not on:
+            body["response_format"] = {"type": "json_object"}
+    else:
+        on = thinking != "off"
+        extra["thinking"] = {"type": "enabled" if on else "disabled"}
+        if on:
+            eff = DEEPSEEK_EFFORTS.get(effort, effort) if effort else None
+            if eff:
+                body["reasoning_effort"] = eff
+        else:
+            # 비추론 모드: 예전 deepseek-chat과 같이 temperature와 JSON 모드 사용
+            body["temperature"] = temp
+            body["response_format"] = {"type": "json_object"}
+    meta = {"thinking_setting": ("enabled" if on else "disabled"),
+            "temperature": None if on else temp,
+            "effort": body.get("reasoning_effort", "") if on else ""}
+    return body, extra, meta
+
 def build_request(model_name, system_prompt, user_prompt, effort=None, thinking="default", temperature=None,
                   for_batch=False):
     """기존 api_client의 단건 호출과 같은 설정으로 요청 body를 만듦."""
@@ -99,13 +147,9 @@ def build_request(model_name, system_prompt, user_prompt, effort=None, thinking=
         return RequestSpec("gemini", body, {"temperature": None if is_35 else temp, "effort": effort or ""})
 
     if p == "deepseek":
-        body = {"model": model_name,
-                "messages": [{"role": "system", "content": system_prompt},
-                             {"role": "user", "content": user_prompt}],
-                "temperature": temp}
-        if "chat" in model_name:
-            body["response_format"] = {"type": "json_object"}
-        return RequestSpec(p, body, {"temperature": temp})
+        body, extra, meta = deepseek_request(model_name, system_prompt, user_prompt, effort, thinking, temperature)
+        body.update(extra)          # HTTP body에는 extra_body 항목이 최상위로 들어감
+        return RequestSpec(p, body, meta)
 
     raise ValueError(p)
 
@@ -168,6 +212,8 @@ def parse_response_body(provider, body, base_meta=None):
         msg = _as_dict(ch.get("message") if isinstance(ch, dict) else _as_dict(ch).get("message"))
         text = msg.get("content") or ""
         thinking = msg.get("reasoning_content") or ""
+        if d.get("model"):
+            meta["served_model"] = d.get("model")   # 실제로 응답한 모델 id (버전 추적용)
         u = d.get("usage") or {}
         meta.update(input_tokens=_g(u, "prompt_tokens"), output_tokens=_g(u, "completion_tokens"),
                     reasoning_tokens=_g(u, "completion_tokens_details.reasoning_tokens"))

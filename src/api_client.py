@@ -9,9 +9,9 @@ from google import genai
 from google.genai import types
 
 try:
-    from src.llm_requests import parse_response_body, _as_dict
+    from src.llm_requests import parse_response_body, _as_dict, deepseek_request
 except ImportError:
-    from llm_requests import parse_response_body, _as_dict
+    from llm_requests import parse_response_body, _as_dict, deepseek_request
 
 # ==============================================================================
 # 1. 실험 설정
@@ -158,7 +158,7 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
     """
     재시도 로직이 포함된 API 호출 함수
 
-    thinking: "default" | "on" | "off"  (현재 Claude에만 적용. 다른 모델은 effort로 추론량을 조절)
+    thinking: "default" | "on" | "off"  (Claude와 DeepSeek V4 이후 모델에 적용. 다른 모델은 effort로 추론량을 조절)
     temperature: None이면 기존 기본값(TEMPERATURE). temperature를 받는 모델(gpt-4o, gemini-2.5,
                  deepseek, thinking을 끈 Claude)에만 적용됨.
 
@@ -267,26 +267,16 @@ def call_model_api(model_name, system_prompt, user_prompt, effort=None, thinking
             # CASE 3: Deepseek Series
             # ----------------------------------------
             elif "deepseek" in model_name:
-                # 1. API 호출용 기본 파라미터 구성
-                kwargs = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "temperature": temp
-                }
-                
-                # 2. deepseek-chat(V3)일 때만 JSON 모드 활성화 
-                # (deepseek-reasoner는 강제 JSON 모드를 지원하지 않으므로 제외)
-                if "chat" in model_name:
-                    kwargs["response_format"] = {"type": "json_object"}
-                    
-                response = client_deepseek.chat.completions.create(**kwargs)
-                
-                # 최종 답변 + 추론 과정(reasoning_content, deepseek-reasoner) + 토큰 수
-                return parse_response_body("deepseek", response, {"temperature": temp})
-            
+                # V4 이후 API: thinking on/off와 effort를 명시적으로 보냄 (llm_requests.deepseek_request 참고)
+                body, extra, meta = deepseek_request(model_name, system_prompt, user_prompt,
+                                                     effort=effort, thinking=thinking, temperature=temperature)
+                response = client_deepseek.chat.completions.create(**body, extra_body=extra or None)
+                out = parse_response_body("deepseek", response, meta)
+                if not (out.get("text") or "").strip():
+                    # JSON 모드에서 유효한 JSON을 못 만들면 내용이 공백으로 옴 -> 재시도
+                    raise ValueError("DeepSeek returned empty content")
+                return out
+
             # ----------------------------------------
             # CASE 4: Claude Series (Opus / Sonnet) - thinking / effort / temperature 제어
             # ----------------------------------------

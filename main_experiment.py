@@ -195,7 +195,7 @@ def parse_response(response_str, sc_id, t_cut, meta, model_name, condition, mode
 # 오류 행 재파싱: 원문(raw_response)이 남아 있는 파싱 실패 행을 API 호출 없이 다시 읽음
 # =========================================================================
 CARRY_COLS = ['thinking_setting', 'temperature', 'effort', 'output_tokens', 'input_tokens', 'thinking_chars',
-              'stop_reason', 'belief_order', 'internal_thinking', 'reasoning_tokens']
+              'stop_reason', 'belief_order', 'internal_thinking', 'reasoning_tokens', 'served_model']
 
 
 def reparse_error_rows(filename, units, mode, condition, model_name):
@@ -364,13 +364,17 @@ def run_batch(model_name, save_dir, units, num_subjects, load_subject, prepare_c
 def check_setting_consistency(save_dir, model_name, effort, thinking, temperature):
     """
     이어서 실행할 폴더에 다른 thinking 설정으로 받은 결과가 있으면 멈춤 (설정이 섞인 결과 방지).
-    Claude만 점검 (thinking_setting 기록이 있는 CSV만 대상).
+    Claude와 DeepSeek를 점검 (thinking_setting 기록이 있는 CSV만 대상).
     """
-    if "claude" not in model_name:
-        return
     import glob
-    from src.api_client import build_claude_params
-    want = build_claude_params(model_name, "", "", effort, thinking, temperature)[1]["thinking_setting"]
+    if "claude" in model_name:
+        from src.api_client import build_claude_params
+        want = build_claude_params(model_name, "", "", effort, thinking, temperature)[1]["thinking_setting"]
+    elif "deepseek" in model_name:
+        from src.llm_requests import deepseek_request
+        want = deepseek_request(model_name, "", "", effort, thinking, temperature)[2]["thinking_setting"]
+    else:
+        return
     found = set()
     for f in glob.glob(os.path.join(save_dir, "subject_*.csv")):
         try:
