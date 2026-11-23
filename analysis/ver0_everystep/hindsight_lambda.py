@@ -30,7 +30,7 @@ import pandas as pd
 import scipy.io as sio
 from scipy.special import logsumexp
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for q in (ROOT, os.path.join(ROOT, "analysis"), os.path.join(ROOT, "src")):
     if q not in sys.path:
         sys.path.insert(0, q)

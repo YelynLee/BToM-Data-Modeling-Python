@@ -7,7 +7,7 @@ share(0 = BToM, 1 = 현재 belief)를 계산. 모델별 run 평균 HI와 run x �
 """
 import os, sys, io, argparse, contextlib
 import numpy as np, pandas as pd
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for q in (ROOT, os.path.join(ROOT, "analysis"), os.path.join(ROOT, "src")):
     if q not in sys.path:
         sys.path.insert(0, q)

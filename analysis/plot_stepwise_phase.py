@@ -36,8 +36,8 @@ for p in (ROOT, os.path.join(ROOT, "src")):
 from src.dataset import df_btom
 from src.config import get_group_indices
 from src.prepare_everystep import apply_phase_labeling, load_reference_everystep
-from analysis.plot_everystep import normalize_scenario_x, get_group_phase_labels, get_phase_index
-from analysis.plot_current_vs_initial_belief import keep_complete, to_prob, phase_means
+from analysis.phase_utils import normalize_scenario_x, get_group_phase_labels, get_phase_index
+from analysis.phase_utils import keep_complete, to_prob, phase_means
 
 SCORES = {
     "belief": {"options": ["L", "M", "Empty"], "prefix": "belief",

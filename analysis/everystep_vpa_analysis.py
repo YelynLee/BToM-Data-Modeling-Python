@@ -23,7 +23,7 @@ if parent_dir not in sys.path:
 
 from src.config import BASE_RESULTS_DIR, get_group_indices
 from src.prepare_everystep import load_reference_everystep
-from analysis.plot_everystep import get_phase_index
+from analysis.phase_utils import get_phase_index
 
 # =========================================================================
 # 🌟 [설정] 모델, 레퍼런스, 색상, 그룹 정의

@@ -6,7 +6,7 @@ from analysis.plot_scatter import plot_scatter_analysis
 from analysis.plot_rmse_corr import plot_combined_metrics
 from analysis.plot_rsa import plot_rsa_analysis
 from src.prepare_everystep import run_prepare_everystep
-from analysis.plot_everystep import run_plot_everystep
+from analysis.ver0_everystep.plot_everystep import run_plot_everystep
 
 def resolve_pkl_path(name, condition, mode):
     """이름(model/human/btom)에 따라 정확한 Pickle 경로를 반환하는 헬퍼 함수

@@ -8,7 +8,7 @@
 """
 import os, sys, io, argparse, contextlib
 import numpy as np, pandas as pd
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for q in (ROOT, os.path.join(ROOT, "analysis"), os.path.join(ROOT, "src")):
     if q not in sys.path:
         sys.path.insert(0, q)
@@ -19,7 +19,7 @@ REFS = ["btom", "truebelief", "nocost", "motionheuristic", "hindsight"]
 
 
 def llm_mean(path, keep):
-    from analysis.plot_everystep import get_phase_index
+    from analysis.phase_utils import get_phase_index
     df = pd.read_csv(path)
     m = df.groupby(["scenario_id", "group_id", "phase", "time_step"])[BELC].mean().reset_index()
     m["phase_idx"] = [get_phase_index(g, p) for g, p in zip(m.group_id, m.phase)]

@@ -12,14 +12,14 @@ warnings.filterwarnings("ignore")
 
 # 현재 스크립트(analysis 폴더)의 상위 경로를 파이썬 탐색 경로에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir) # 상위 폴더 (프로젝트 루트)
+parent_dir = os.path.dirname(os.path.dirname(current_dir)) # 상위 폴더 (프로젝트 루트)
 
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from src.config import BASE_RESULTS_DIR, get_group_indices, BEHAVIOR_GROUPS
 from src.prepare_everystep import load_reference_everystep
-from analysis.plot_everystep import get_phase_index
+from analysis.phase_utils import get_phase_index
 
 # 분석할 6개의 인지 점수 컬럼
 SCORE_COLS = ['desire_K', 'desire_L', 'desire_M', 'belief_L', 'belief_M', 'belief_Empty']
