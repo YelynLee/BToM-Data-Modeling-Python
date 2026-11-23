@@ -59,8 +59,9 @@ def fig_r0(out, T=8, tq=4):
         y = len(rows) - 1 - i
         for t in range(1, T + 1):
             shown = log == "full" or t <= tq
-            ax.add_patch(plt.Rectangle((t - 0.45, y - 0.3), 0.9, 0.6, facecolor="#cfd8e3" if shown else "white",
-                                       edgecolor="#8a96a3" if shown else "#c9c9c9", ls="-" if shown else "--", lw=0.8))
+            ax.add_patch(plt.Rectangle((t - 0.45, y - 0.3), 0.9, 0.6, facecolor="white",
+                                       edgecolor="#5f6b78" if shown else "#c9c9c9", ls="-" if shown else "--", lw=0.8,
+                                       hatch="////" if shown else None))
         for q in qs:
             ax.plot(q, y + 0.42, marker="v", ms=8, color=wc[word], clip_on=False)
         ax.text(0.2, y, name, ha="right", va="center", fontsize=10, fontweight="bold" if name in ("End-step", "Every-step", "Prefix-step") else "normal")
@@ -73,8 +74,8 @@ def fig_r0(out, T=8, tq=4):
         ax.text(T + 0.9, y, "full (1..T)" if log == "full" else "1..t", va="center", fontsize=9)
         ax.text(T + 2.6, y, nj, va="center", fontsize=9)
         ax.text(T + 4.6, y, word, va="center", fontsize=9, color=wc[word])
-    for x, h in [(T + 0.9, "Log in context"), (T + 2.6, "Judgments per call"), (T + 4.6, "Question wording")]:
-        ax.text(x, len(rows) - 0.25, h, fontsize=9, fontweight="bold")
+    for x, h in [(T + 0.9, "Log in\ncontext"), (T + 2.6, "Judgments\nper call"), (T + 4.6, "Question\nwording")]:
+        ax.text(x, len(rows) - 0.32, h, fontsize=9, fontweight="bold", va="bottom")
     ax.set_xticks(range(1, T + 1), [{1: "1", tq: "t", tq + 1: "t+1", T: "T"}.get(t, "") for t in range(1, T + 1)])
     ax.set_xlabel("time step (example: question about step t)")
     pairs = [(3, 2, "output format"), (2, 1, "information"), (1, 0, "wording")]
@@ -82,14 +83,14 @@ def fig_r0(out, T=8, tq=4):
         ax.annotate("", xy=(-2.75, b_), xytext=(-2.75, a_), arrowprops=dict(arrowstyle="<->", lw=0.8))
         ax.text(-2.85, (a_ + b_) / 2, lab, ha="right", va="center", fontsize=8.5, style="italic")
     from matplotlib.lines import Line2D
-    ax.legend(handles=[Patch(facecolor="#e4e4e1", edgecolor="none", label="differs from Every-step"),
-                       Patch(facecolor="#cfd8e3", edgecolor="#8a96a3", label="step in context"),
+    ax.legend(handles=[Patch(facecolor="#e4e4e1", edgecolor="none", label="setting differs from Every-step"),
+                       Patch(facecolor="white", edgecolor="#5f6b78", hatch="////", label="step in context"),
                        Patch(facecolor="white", edgecolor="#c9c9c9", ls="--", label="step not shown"),
                        Line2D([], [], marker="v", ls="", color=wc["End"], label="question, End-step wording"),
                        Line2D([], [], marker="v", ls="", color=wc["Every"], label="question, Every-step wording")],
               loc="upper center", bbox_to_anchor=(0.45, -0.18), ncol=5, frameon=False, fontsize=8.5)
     ax.set_xlim(-5.2, T + 6.6)
-    ax.set_ylim(-0.6, len(rows) - 0.05)
+    ax.set_ylim(-0.6, len(rows) + 0.25)
     ax.set_yticks([])
     for sp in ("left", "top", "right"):
         ax.spines[sp].set_visible(False)
