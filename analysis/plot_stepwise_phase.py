@@ -8,6 +8,9 @@ Stepwise(everystep / prefixstep) 응답을 phase 정규화 x축 위에 그려 �
            (기본: 입력 경로에서 results/<model>/<condition>/model_data.pkl을 찾음. --endstep으로 지정/끄기)
   - 배경(선택): --show_scenarios 시나리오별 얇은 선, --refs btom,hindsight 레퍼런스 모델의 phase 평균
 
+--delta        : LLM − BToM 차이를 그림 (0 = BToM). End-step 점도 End-step BToM과의 차이
+--ci           : phase 평균에 시나리오 bootstrap 95% CI 띠 (기본 켬, --no_ci로 끔)
+--better       : Better 그룹 열 제목(--labels 값) -> 초록, 나머지 -> 자홍 (논문 Figure 3 색)
 --score belief : initial belief(t=1) 응답, 논문과 같은 확률 정규화
 --score desire : desire 응답 (1~7)
 
@@ -16,6 +19,12 @@ Stepwise(everystep / prefixstep) 응답을 phase 정규화 x축 위에 그려 �
       --input results/claude-opus-4-6/vanilla/everystep/everystep_valid_only.csv results/claude-opus-4-6/vanilla/prefixstep \\
       --labels "Every-step" "Prefix-step" --out results/claude-opus-4-6/vanilla/compare/phase_belief.png
   배경까지 그리기: --show_scenarios --refs btom,hindsight
+  2x2 (계열 x 성능):
+  python analysis/plot_stepwise_phase.py --score belief --delta \\
+      --input results/claude-opus-4-6/vanilla/prefixstep results/claude-sonnet-4-6/vanilla/prefixstep \\
+              results/gemini-2.5-pro/vanilla/prefixstep results/gemini-2.5-flash/vanilla/prefixstep \\
+      --labels "Claude-4.6-Opus" "Claude-4.6-Sonnet" "Gemini-2.5-Pro" "Gemini-2.5-Flash" \\
+      --better "Claude-4.6-Opus" "Gemini-2.5-Pro" --out results/stats/prefix_2x2/phase_belief_delta.png
 """
 import os
 import sys
@@ -58,6 +67,15 @@ GROUP_TITLES = {1: "Check-GoBack (Present)", 2: "Check-Stay (Present)", 4: "Chec
 def load_run(path):
     import glob
     files = [path] if path.endswith(".csv") else sorted(glob.glob(os.path.join(path, "subject_*.csv")))
+    if not files and os.path.isdir(path):
+        # 설정별 하위 폴더(thinking_off 등)가 하나뿐이면 그 폴더를 씀
+        subs = [d for d in sorted(os.listdir(path)) if glob.glob(os.path.join(path, d, "subject_*.csv"))]
+        if len(subs) == 1:
+            print(f"  {path}: using sub-folder {subs[0]}/")
+            path = os.path.join(path, subs[0])
+            files = sorted(glob.glob(os.path.join(path, "subject_*.csv")))
+        elif len(subs) > 1:
+            raise FileNotFoundError(f"{path} has several setting folders {subs}; give one explicitly")
     if not files:
         raise FileNotFoundError(f"No subject_*.csv in {path}")
     frames = []
@@ -106,16 +124,45 @@ def find_endstep_pkl(path):
     return None
 
 
-def endstep_group_stats(pkl_path, score):
-    """{group_id: {option: (mean, sd)}} — 시나리오별 값(논문 pkl의 평균 / 정규화 belief)의 그룹 평균과 시나리오 간 SD."""
+def btom_endstep(score):
+    """BToM의 End-step 값 (3, 78) = 단계별 BToM 레퍼런스의 마지막 스텝."""
+    cfg = SCORES[score]
+    ref = load_reference_everystep("btom")
+    last = ref.loc[ref.groupby("scenario_id")["time_step"].idxmax()].set_index("scenario_id")
+    cols = [f"{cfg['prefix']}_{o}" for o in cfg["options"]]
+    out = np.full((3, 78), np.nan)
+    for sid, row in last[cols].iterrows():
+        out[:, int(sid) - 1] = row.values
+    return out
+
+
+def endstep_group_stats(pkl_path, score, baseline=None):
+    """{group_id: {option: (mean, sd)}} — 시나리오별 값(논문 pkl의 평균 / 정규화 belief)의 그룹 평균과 시나리오 간 SD.
+    baseline (3, 78)을 주면 시나리오별로 뺀 값(LLM − BToM)의 통계."""
     d = pickle.load(open(pkl_path, "rb"))
     arr = d["bel_inf_mean_norm"] if score == "belief" else d["des_inf_mean"]   # (3, 78)
+    if baseline is not None:
+        arr = arr - baseline
     opts = SCORES[score]["options"]
     out = {}
     for gid, ids in enumerate(get_group_indices(include_irrational=False), start=1):
         v = arr[:, np.array(ids) - 1]
         out[gid] = {o: (float(np.nanmean(v[k])), float(np.nanstd(v[k], ddof=1))) for k, o in enumerate(opts)}
     return out
+
+
+def phase_ci(sub, col, n_boot=1000, seed=0):
+    """phase 평균의 시나리오 bootstrap 95% CI (phase_means와 같은 집계)."""
+    per_sc = sub.groupby(["scenario_id", "phase_idx"])[col].mean().unstack("phase_idx")
+    vals = per_sc.to_numpy()
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(vals), size=(n_boot, len(vals)))
+    import warnings
+    with warnings.catch_warnings():            # 일부 phase가 없는 bootstrap 표본 → NaN (무시)
+        warnings.simplefilter("ignore", RuntimeWarning)
+        boots = np.nanmean(vals[idx], axis=1)  # (n_boot, n_phase)
+    lo, hi = np.nanpercentile(boots, [2.5, 97.5], axis=0)
+    return per_sc.columns.values + 0.5, lo, hi
 
 
 def end_labels(ax, ends, gap):
@@ -127,8 +174,15 @@ def end_labels(ax, ends, gap):
                     fontsize=8.5, color="#333333")
 
 
-def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=False, endsteps=None):
-    cfg = SCORES[score]
+C_BETTER, C_WORSE = "#60A917", "#D80073"   # 논문 Figure 3의 Better / Worse 색
+
+
+def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=False, endsteps=None,
+         delta=False, ci=True, better=None):
+    cfg = dict(SCORES[score])
+    if delta:
+        cfg["ylabel"] = "LLM − BToM" + (" (probability)" if score == "belief" else " (rating)")
+        cfg["ylim"] = (-0.5, 0.5) if score == "belief" else (-3.5, 3.5)
     endsteps = endsteps or [None] * len(runs)
     END_DX = 0.35   # End-step 점을 마지막 phase 평균점 오른쪽에 살짝 띄움
     nrow, ncol = len(groups), len(runs)
@@ -152,12 +206,24 @@ def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=Fals
                 # (선택) 배경: 시나리오별 얇은 선
                 if show_scenarios:
                     for _, s in gdf.groupby("scenario_id"):
-                        ax.plot(s["x_norm"], s[col], color=color, alpha=0.16, lw=1)
+                        ax.plot(s["x_norm"], s[col] - (s[f"btom__{col}"] if delta else 0), color=color,
+                                alpha=0.16, lw=1)
                 # (선택) 배경: 레퍼런스 모델 phase 평균 (--refs)
                 for ref in refs:
+                    if delta and ref == "btom":
+                        continue          # delta에서는 BToM = 0 선
                     x, y = phase_means(gdf, f"{ref}__{col}")
+                    if delta:
+                        y = y - phase_means(gdf, f"btom__{col}")[1]
                     ax.plot(x, y, color=color, lw=1.6, ls=REF_STYLE[ref][0], alpha=0.9)
-                x, y = phase_means(gdf, col)
+                vcol = col
+                if delta:
+                    vcol = f"delta__{col}"
+                    gdf = gdf.assign(**{vcol: gdf[col] - gdf[f"btom__{col}"]})
+                if ci:
+                    xc, lo, hi = phase_ci(gdf, vcol)
+                    ax.fill_between(xc, lo, hi, color=color, alpha=0.16, lw=0, zorder=2)
+                x, y = phase_means(gdf, vcol)
                 ax.plot(x, y, color=color, lw=2.6, marker="o", ms=5, markeredgecolor="white",
                         markeredgewidth=1, zorder=3)
                 x_lab = x[-1]
@@ -175,7 +241,8 @@ def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=Fals
                 same = [b for b, (xb, yb) in ends.items() if b != a and b not in used and abs(ya - yb) < 1e-9]
                 if same:
                     pairs = [a] + same
-                    vals = [gdf[f"{cfg['prefix']}_{o}"] for o in cfg["options"] if cfg["names"][o] in pairs]
+                    vals = [gdf[f"{cfg['prefix']}_{o}"] - (gdf[f"btom__{cfg['prefix']}_{o}"] if delta else 0)
+                            for o in cfg["options"] if cfg["names"][o] in pairs]
                     if all(np.allclose(vals[0].values, v.values) for v in vals[1:]):
                         used.update(same)
                         a = " = ".join([pairs[0]] + [p.replace("Truck ", "") for p in pairs[1:]])
@@ -185,18 +252,21 @@ def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=Fals
 
             for k in labels_x:
                 ax.axvline(k, color="#BBBBBB", ls="--", lw=0.6, zorder=0)
+            if delta:
+                ax.axhline(0, color="#333333", lw=1.0, zorder=1)
             ax.set_xticks([k + 0.5 for k in labels_x])
             ax.set_xticklabels([labels_x[k] for k in labels_x], rotation=35, ha="right", fontsize=8.5)
             ax.set_xlim(0, max(labels_x) + (1.45 + END_DX if any(endsteps) else 1.45))
             ax.set_ylim(*cfg["ylim"])
-            if score == "desire":
+            if score == "desire" and not delta:
                 ax.set_yticks(range(1, 8))
             ax.grid(axis="y", color="#EEEEEE", lw=0.6)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
             if r == 0:
-                ax.set_title(f"{label}\n({n_subj} subject{'s' if n_subj > 1 else ''})", fontsize=11.5,
-                             fontweight="bold", pad=10)
+                tcol = "#222222" if better is None else (C_BETTER if label in better else C_WORSE)
+                ax.set_title(f"{label}\n({n_subj} run{'s' if n_subj > 1 else ''})", fontsize=11.5,
+                             fontweight="bold", pad=10, color=tcol)
             if c == 0:
                 n_sc = gdf["scenario_id"].nunique()
                 ax.set_ylabel(f"{GROUP_TITLES.get(gid, gid)}\n(n = {n_sc} scenarios)\n\n{cfg['ylabel']}",
@@ -204,14 +274,20 @@ def plot(runs, labels, score, refs, groups, title, out_path, show_scenarios=Fals
 
     handles = [mlines.Line2D([], [], color=cfg["colors"][o], lw=2.6, marker="o", ms=5, label=cfg["names"][o])
                for o in cfg["options"]]
-    handles += [mlines.Line2D([], [], color="#555555", lw=2.6, marker="o", ms=5, label="Phase mean (LLM)")]
+    handles += [mlines.Line2D([], [], color="#555555", lw=2.6, marker="o", ms=5,
+                              label="Phase mean (LLM − BToM)" if delta else "Phase mean (LLM)")]
+    if ci:
+        import matplotlib.patches as mpatches
+        handles.append(mpatches.Patch(color="#555555", alpha=0.2, label="95% CI (scenario bootstrap)"))
+    if delta:
+        handles.append(mlines.Line2D([], [], color="#333333", lw=1.0, label="BToM (= 0)"))
     if any(endsteps):
         handles.append(mlines.Line2D([], [], color="#555555", marker="D", ls="None", ms=7,
-                                     label="End-step (mean ± SD across scenarios)"))
+                                     label="End-step" + (" − BToM" if delta else "") + " (mean ± SD across scenarios)"))
     if show_scenarios:
         handles.append(mlines.Line2D([], [], color="#777777", lw=1, alpha=0.4, label="Individual scenarios"))
     handles += [mlines.Line2D([], [], color="#555555", lw=1.6, ls=REF_STYLE[ref][0], label=REF_STYLE[ref][1])
-                for ref in refs]
+                for ref in refs if not (delta and ref == "btom")]
     fig.legend(handles=handles, loc="lower center", ncol=min(len(handles), 4), frameon=False, fontsize=9,
                bbox_to_anchor=(0.5, -0.01))
     fig.suptitle(title, fontsize=13, y=0.995)
@@ -226,7 +302,10 @@ def main():
     ap.add_argument("--input", nargs="+", required=True, help="실행 결과 폴더 또는 csv (여러 개 = 열)")
     ap.add_argument("--labels", nargs="+", default=None, help="각 입력의 열 제목")
     ap.add_argument("--score", default="belief", choices=list(SCORES))
-    ap.add_argument("--refs", default="", help="(선택) 배경에 그릴 레퍼런스 모델 phase 평균, 예: btom,hindsight. 기본: 없음")
+    ap.add_argument("--refs", default="btom", help="배경에 그릴 레퍼런스 모델 phase 평균 (쉼표). 기본: btom. 끄기: --refs none")
+    ap.add_argument("--delta", action="store_true", help="LLM − BToM 차이를 그림")
+    ap.add_argument("--no_ci", action="store_true", help="phase 평균의 95% CI 띠를 그리지 않음")
+    ap.add_argument("--better", nargs="*", default=None, help="Better 그룹 열 제목 (초록), 나머지는 자홍")
     ap.add_argument("--show_scenarios", action="store_true", help="(선택) 시나리오별 얇은 선을 배경에 그림")
     ap.add_argument("--endstep", nargs="+", default=["auto"],
                     help="End-step pkl 경로 (입력 순서대로). auto = 입력 경로에서 추정, none = 표시 안 함")
@@ -235,7 +314,9 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    ref_names = [r for r in args.refs.split(",") if r]
+    ref_names = [r for r in args.refs.split(",") if r and r != "none"]
+    if args.delta and "btom" not in ref_names:
+        ref_names = ["btom"] + ref_names
     refs = {r: load_reference_everystep(r) for r in ref_names}
     labels = args.labels or [os.path.basename(os.path.normpath(p)) for p in args.input]
 
@@ -249,15 +330,18 @@ def main():
     endsteps = []
     for p, e in zip(args.input, spec):
         path = find_endstep_pkl(p) if e == "auto" else (None if e == "none" else e)
-        endsteps.append(endstep_group_stats(path, args.score) if path else None)
+        base = btom_endstep(args.score) if args.delta else None
+        endsteps.append(endstep_group_stats(path, args.score, base) if path else None)
         print(f"  End-step: {path or '(표시 안 함)'}")
 
     want = [int(g) for g in args.groups.split(",")]
     present = set().union(*[set(m["group_id"]) for m, _ in runs])
     groups = [g for g in want if g in present]
     title = args.title or f"Stepwise {args.score} by phase"
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     plot(runs, labels, args.score, ref_names, groups, title, args.out,
-         show_scenarios=args.show_scenarios, endsteps=endsteps)
+         show_scenarios=args.show_scenarios, endsteps=endsteps, delta=args.delta, ci=not args.no_ci,
+         better=args.better)
 
 
 if __name__ == "__main__":
