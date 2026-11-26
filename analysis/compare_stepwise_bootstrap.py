@@ -59,7 +59,7 @@ for p in (ROOT, os.path.join(ROOT, "src"), os.path.join(ROOT, "analysis")):
 from src.dataset import df_btom
 from src.config import get_group_indices
 from src.prepare_everystep import apply_phase_labeling, load_reference_everystep
-from analysis.plot_everystep import get_phase_index
+from analysis.phase_utils import get_phase_index
 from stats_utils import (boot_indices, set_stratified, percentile_ci, boot_p_two_sided, paired_signflip_test)
 
 OPTS = {"belief": ["L", "M", "Empty"], "desire": ["K", "L", "M"]}

@@ -27,14 +27,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for p in (ROOT, os.path.join(ROOT, "src")):
     if p not in sys.path:
         sys.path.append(p)
 
 from src.dataset import df_btom
 from src.prepare_everystep import apply_phase_labeling, load_reference_everystep
-from analysis.plot_everystep import normalize_scenario_x, get_group_phase_labels, get_phase_index
+from analysis.phase_utils import normalize_scenario_x, get_group_phase_labels, get_phase_index
+from analysis.phase_utils import keep_complete, to_prob, phase_means  # 공통 함수 (analysis/phase_utils.py)
 
 # Figure 5와 동일한 belief 색
 OPTIONS = ["L", "M", "Empty"]
@@ -68,23 +69,8 @@ def load_llm(input_path):
     return df, len(files)
 
 
-def keep_complete(df):
-    """모든 time step이 있는 (subject, scenario)만 남김."""
-    expected = df_btom.groupby("scenario_id").size()
-    got = df.groupby(["subject_id", "scenario_id"]).size().reset_index(name="n")
-    got["exp"] = got["scenario_id"].map(expected)
-    ok = got[got["n"] == got["exp"]][["subject_id", "scenario_id"]]
-    dropped = got[got["n"] != got["exp"]]
-    for r in dropped.itertuples():
-        print(f"  ⚠️ drop subject {r.subject_id} scenario {r.scenario_id}: {r.n}/{r.exp} steps")
-    return df.merge(ok, on=["subject_id", "scenario_id"])
 
 
-def to_prob(block):
-    """1~7 척도 -> (x-1)/sum, 논문 bel_inf_mean_norm과 동일한 처리."""
-    shifted = np.maximum(block - 1, 0)
-    total = shifted.sum(axis=1).replace(0, 1.0)
-    return shifted.div(total, axis=0)
 
 
 # -------------------------------------------------------------------------
@@ -126,11 +112,6 @@ def prepare(df, scale):
     return m[m["phase_idx"] != 9]
 
 
-def phase_means(sub, col):
-    """시나리오별 phase 평균 -> 시나리오 간 평균. x = 구간 중앙."""
-    per_sc = sub.groupby(["scenario_id", "phase_idx"])[col].mean().reset_index()
-    out = per_sc.groupby("phase_idx")[col].mean()
-    return out.index.values + 0.5, out.values
 
 
 # -------------------------------------------------------------------------

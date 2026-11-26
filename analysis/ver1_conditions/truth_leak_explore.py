@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 import scipy.io as sio
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for p in (ROOT, os.path.join(ROOT, "src")):
     if p not in sys.path:
         sys.path.insert(0, p)

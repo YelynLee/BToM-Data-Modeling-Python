@@ -24,7 +24,7 @@ def current_belief_index():
     """agent의 현재 belief(Spot 2가 보인 뒤 참에 확신, 그 전에는 BToM)를 평정으로 넣었을 때의 hindsight index.
     Spot 2가 보이기 전에는 Hindsight = BToM이라 지수에서 빠지므로 TrueBelief 레퍼런스로 계산한 값과 같음."""
     import sys, io, contextlib
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     for q in (root, os.path.join(root, "analysis"), os.path.join(root, "src")):
         if q not in sys.path:
             sys.path.insert(0, q)

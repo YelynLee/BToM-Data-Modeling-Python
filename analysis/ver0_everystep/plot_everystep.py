@@ -9,13 +9,14 @@ import matplotlib.patches as mpatches
 
 # 현재 스크립트(analysis 폴더)의 상위 경로를 파이썬 탐색 경로에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir) # 상위 폴더 (프로젝트 루트)
+parent_dir = os.path.dirname(os.path.dirname(current_dir)) # 상위 폴더 (프로젝트 루트)
 
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from src.prepare_everystep import load_reference_everystep
 from src.config import BASE_RESULTS_DIR, BEHAVIOR_GROUPS, get_group_indices
+from analysis.phase_utils import get_phase_index, get_group_phase_labels, normalize_scenario_x  # 공통 함수 (analysis/phase_utils.py)
 
 # =========================================================================
 # 🌟 [NEW] VPA 시각화를 위한 색상 및 설정
@@ -33,73 +34,8 @@ VPA_REFS_BELIEF = ['btom', 'truebelief', 'nocost', 'motionheuristic', 'hindsight
 # =========================================================================
 # 1. Phase-Normalization (위상 정규화) 로직
 # =========================================================================
-def get_phase_index(group_id, phase_name):
-    """
-    각 그룹별로 Phase가 발생해야 하는 논리적 순서(Integer Bin)를 매핑합니다.
-    서로 다른 시나리오라도 같은 Phase면 같은 X축 구간(예: 1.0 ~ 2.0)에 놓이게 됩니다.
-    💡 [수정] Prior를 제거하고 Start를 0으로 설정하여 전체 인덱스를 1씩 앞당김
-    """
-    # if phase_name == 'Prior': return 0
-    if phase_name == 'Start': return 0
-    if phase_name == 'Approach G1': return 1
-    
-    # 그룹별 고유 Phase 매핑
-    if group_id in [1, 4]: # Check-GoBack
-        if phase_name == 'Pass G1': return 2
-        if phase_name == 'See G2': return 3
-        if phase_name == 'Stop': return 4
-        if phase_name == 'Return G1': return 5
-        if phase_name == 'Selected': return 6
-    elif group_id == 2: # Check-Stay
-        if phase_name == 'Pass G1': return 2
-        if phase_name == 'See G2': return 3
-        if phase_name == 'Stop': return 4
-        if phase_name == 'Approach G2': return 5
-        if phase_name == 'Selected': return 6
-    elif group_id in [3, 5]: # No Check
-        if phase_name == 'Selected': return 2
-    elif group_id in [6, 7]: # Check-Partial
-        if phase_name == 'Pass G1': return 2
-        if phase_name == 'See G2': return 3
-        if phase_name == 'Stop between G1 and G2': return 4
-    
-    return 9 # Unknown
 
-def get_group_phase_labels(group_id):
-    """X축 하단에 표시될 라벨 텍스트 생성"""
-    labels = {0: 'Start', 1: 'Appr G1'}
 
-    if group_id in [1, 4]:
-        labels.update({2: 'Pass G1', 3: 'See G2', 4: 'Stop', 5: 'Return G1', 6: 'Selected'})
-    elif group_id == 2:
-        labels.update({2: 'Pass G1', 3: 'See G2', 4: 'Stop', 5: 'Appr G2', 6: 'Selected'})
-    elif group_id in [3, 5]:
-        labels.update({2: 'Selected'})
-    elif group_id in [6, 7]:
-        labels.update({2: 'Pass G1', 3: 'See G2', 4: 'Stop Btw'})
-
-    return labels
-
-def normalize_scenario_x(df_sc):
-    """단일 시나리오 내에서 time_step을 Phase 구간(Bin)으로 정규화합니다."""
-    df_sc = df_sc.copy()
-    df_sc['x_norm'] = 0.0
-    group_id = df_sc['group_id'].iloc[0]
-    
-    for phase in df_sc['phase'].unique():
-        idx = get_phase_index(group_id, phase)
-        mask = df_sc['phase'] == phase
-        t_vals = df_sc.loc[mask, 'time_step']
-        
-        if len(t_vals) == 1:
-            # 해당 Phase가 1개 타임스텝뿐이면 구간의 한가운데(0.5)에 배치
-            df_sc.loc[mask, 'x_norm'] = idx + 0.5
-        else:
-            # 여러 타임스텝이면 구간[idx, idx+1] 내에 균등 분배
-            t_min, t_max = t_vals.min(), t_vals.max()
-            df_sc.loc[mask, 'x_norm'] = idx + (t_vals - t_min) / (t_max - t_min)
-            
-    return df_sc.sort_values('time_step')
 
 # =========================================================================
 # 2. 통합 플롯 시각화 함수 (Raw/Delta, All/Extremes, VPA 오버레이)
