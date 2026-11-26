@@ -9,6 +9,9 @@ Hindsight 모델 없이 (교수님 결정) BToM과 대안 레퍼런스 3개(True
   rm_r         : 시나리오 내 평균을 뺀 뒤의 r (궤적 안에서의 변화가 BToM과 같은 모양인지), 옵션 평균
   update_r     : 연속 스텝 변화 Δ_t의 r (언제, 어느 방향으로 판단을 바꾸는지)
   vpa_unique_* : BToM / TrueBelief / NoCost / MotionHeuristic 고유 adjusted R² (0으로 자르지 않음), vpa_total
+                 (원점수: 시나리오 간 차이 포함)
+  wvpa_*       : 같은 VPA를 시나리오 내 평균을 뺀 값으로 (within-trajectory). TrueBelief belief는 시나리오 안에서
+                 상수라 정의되지 않음(NaN). 단계별 변화를 무엇이 설명하는지를 보려면 이쪽
   mae          : |LLM − BToM| 평균 (시나리오 평균 후 평균)
   final_human_r: 마지막 스텝(전체 궤적)의 판단과 사람 End-step 판단의 r (pooled 3 옵션)
   final_btom_r : 마지막 스텝과 BToM End-step의 r
@@ -125,6 +128,22 @@ class Data:
             out[f"{score}_vpa_total"] = full
             for i, r in enumerate(names):
                 out[f"{score}_vpa_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
+            # VPA (시나리오 내 평균 제거 = within-trajectory). 시나리오 안에서 상수인 레퍼런스(TrueBelief belief)는 빠짐
+            yc = np.column_stack([self._center(agg[:, k], rw) for k in range(sl.start, sl.stop)])[rep].ravel(order="F")
+            Xc = np.column_stack([np.column_stack([self._center(self.refs[r][:, k], rw) for k in range(sl.start, sl.stop)])
+                                  [rep].ravel(order="F") for r in REFS])
+            ok = ~np.isnan(yc) & ~np.isnan(Xc).any(axis=1)
+            yc, Xc = yc[ok], Xc[ok]
+            keep = Xc.std(axis=0) > 1e-6
+            names = [r for r, k in zip(REFS, keep) if k]
+            yz = (yc - yc.mean()) / yc.std()
+            Xz = (Xc[:, keep] - Xc[:, keep].mean(axis=0)) / Xc[:, keep].std(axis=0)
+            full = _adj_r2(yz, Xz)
+            out[f"{score}_wvpa_total"] = full
+            for r in REFS:
+                out[f"{score}_wvpa_unique_{r}"] = np.nan
+            for i, r in enumerate(names):
+                out[f"{score}_wvpa_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
             # 마지막 스텝 vs 사람 / BToM End-step
             fl = agg[self.last][:, sl]
             Ws = np.repeat(sw[:, None].astype(float), 3, axis=1).ravel()
@@ -236,7 +255,10 @@ def main():
 
     plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary.png"))
     plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary_with_update.png"), with_update=True)
-    plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa.png"))
+    plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa.png"), "vpa",
+             "Prefix-step VPA, raw values")
+    plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa_within.png"), "wvpa",
+             "Prefix-step VPA, within-trajectory (scenario means removed)")
 
 
 def _dot_panel(ax, per_model, models, metric, ylim=None):
@@ -261,15 +283,14 @@ def _dot_panel(ax, per_model, models, metric, ylim=None):
         ax.spines[s].set_visible(False)
 
 
-SUMMARY_COLS = [("final_human_r", "Final step\nvs Human"), ("level_r", "Step-wise\nvs BToM"),
-                ("rm_r", "Within-trajectory\nvs BToM")]
+SUMMARY_COLS = [("final_human_r", "Final step\nvs Human"), ("rm_r", "Within-trajectory\nvs BToM")]
 UPDATE_COL = ("update_r", "Step-to-step update\nvs BToM")
 
 
 def plot_summary(per_model, models, out, with_update=False):
     cols = SUMMARY_COLS + ([UPDATE_COL] if with_update else [])
     nc = len(cols)
-    fig, axes = plt.subplots(2, nc, figsize=(2.9 * nc + 1.0, 5.6), sharey=True, squeeze=False)
+    fig, axes = plt.subplots(2, nc, figsize=(3.1 * nc + 1.0, 5.6), sharey=True, squeeze=False)
     for r, score in enumerate(("desire", "belief")):          # desire 먼저 (논문 순서)
         for c, (k, t) in enumerate(cols):
             ax = axes[r, c]
@@ -293,7 +314,7 @@ def plot_summary(per_model, models, out, with_update=False):
     print(f"✅ saved: {out}")
 
 
-def plot_vpa(per_model, models, out):
+def plot_vpa(per_model, models, out, prefix="vpa", title="Prefix-step VPA"):
     colors = {"btom": "#E0A93B", "truebelief": "#6AA9C9", "nocost": "#8FBF7F", "motionheuristic": "#B8969A"}
     labs = [m[0] for m in models]
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), sharey=True)
@@ -301,11 +322,14 @@ def plot_vpa(per_model, models, out):
     for ax, score in zip(axes, ("desire", "belief")):          # desire 먼저 (논문 순서)
         for j, r in enumerate(REFS):
             for i, lab in enumerate(labs):
-                row = per_model[(per_model.model == lab) & (per_model.metric == f"{score}_vpa_unique_{r}")]
-                if row.empty:
+                row = per_model[(per_model.model == lab) & (per_model.metric == f"{score}_{prefix}_unique_{r}")]
+                x = j + (i - 1.5) * w
+                if row.empty or np.isnan(row.iloc[0].value):
+                    if i == 0:
+                        ax.text(j, 0.01, "n/a\n(constant within\ntrajectory)", ha="center", va="bottom", fontsize=8,
+                                color="#777777")
                     continue
                 row = row.iloc[0]
-                x = j + (i - 1.5) * w
                 tier = models[i][2]
                 ax.bar(x, row.value, w * 0.9, color=colors[r], edgecolor=C_BETTER if tier == "better" else C_WORSE,
                        lw=1.6, hatch=None if models[i][1] == models[0][1] else "///")
@@ -327,7 +351,7 @@ def plot_vpa(per_model, models, out):
     h += [mpatches.Patch(facecolor="white", edgecolor=C_BETTER, lw=1.6, label="Better (outline)"),
           mpatches.Patch(facecolor="white", edgecolor=C_WORSE, lw=1.6, label="Worse (outline)")]
     fig.legend(handles=h, loc="lower center", ncol=6, frameon=False, fontsize=8.5)
-    fig.suptitle("Prefix-step VPA (bars in order: " + ", ".join(labs) + ")", fontsize=11)
+    fig.suptitle(f"{title} (bars in order: " + ", ".join(labs) + ")", fontsize=11)
     fig.tight_layout(rect=(0, 0.07, 1, 0.94))
     fig.savefig(out, dpi=200)
     plt.close(fig)

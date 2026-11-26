@@ -11,7 +11,10 @@
   - 분기 시점(diverges, half-max 기준): 핵심 옵션의 (Better − Worse) 차이가 그 phase부터 마지막 phase까지
     (a) 최대 차이와 같은 부호, (b) 최대 차이의 절반 이상, (c) 시나리오 bootstrap 95% CI가 0을 포함하지 않음
     을 모두 만족하는 첫 phase (Start 제외). 시나리오 간 변동이 작아 CI만으로는 아주 작은 차이도 유의해지므로
-    효과 크기 조건(a, b)을 함께 씀. 그 지점부터 배경을 옅게 칠함
+    효과 크기 조건(a, b)을 함께 씀. (기록용, _divergence.csv의 onset 열)
+  - 그림의 굵은 x축 레이블 = 주요 분기 구간: 핵심 옵션의 Better − Worse 차이가 가장 크게 벌어지는 곳.
+    phase를 스텝 위치로 앞/뒤 절반으로 나눈 소구간 사이에서 차이 증가가 가장 큰 곳을 찾아,
+    두 phase에 걸치면(앞 phase 끝 -> 다음 phase 시작) 두 phase 모두, 한 phase 안이면 그 phase만 굵게
 update 패널
   - Δ_t = 판단_t − 판단_{t−1} (같은 시나리오 안)과 BToM의 Δ의 Pearson r (옵션 3개 pooled), 시나리오 bootstrap 95% CI
   - prefix_2x2.py의 update_r과 같은 정의 (여기서는 이 그룹 시나리오만)
@@ -79,6 +82,26 @@ def sustained_onset(dci, frac=0.5):
         else:
             break
     return onset
+
+
+def jump_phases(mb, mw, col, peak_sign):
+    """Better − Worse 차이가 가장 크게 벌어지는 지점의 phase(들).
+    phase를 스텝 위치(x_norm)로 앞/뒤 절반으로 나눈 소구간(스텝이 하나뿐인 phase는 하나)마다 시나리오 평균 차이를 구하고,
+    연속한 소구간 사이에서 (최대 차이 부호 기준) 차이가 가장 많이 커지는 곳을 찾음.
+    두 소구간이 다른 phase면 두 phase 모두(경계에서 분기), 같은 phase 안이면 그 phase만."""
+    def sub(m):
+        m = m.assign(half=((m["x_norm"] - m["phase_idx"]) >= 0.5).astype(int))
+        single = m.groupby("phase_idx")["time_step"].transform("nunique") <= 1
+        m.loc[single, "half"] = 0
+        return m.groupby(["scenario_id", "phase_idx", "half"])[col].mean()
+    g = (sub(mb) - sub(mw)).groupby(level=["phase_idx", "half"]).mean().sort_index() * peak_sign
+    keys = list(g.index)
+    jumps = np.diff(g.values)
+    if len(jumps) == 0:
+        return [], g
+    j = int(np.nanargmax(jumps))
+    (pa, _), (pb, _) = keys[j], keys[j + 1]
+    return ([pa, pb] if pa != pb else [pb]), g
 
 
 def update_r(m, score, n_boot, rng):
@@ -165,8 +188,8 @@ def main():
     n_sc = data[any_lab]["desire"]["scenario_id"].nunique()
     fam_names = list(fams)
 
-    fig = plt.figure(figsize=(14.5, 3.0 * (1 + len(fam_names)) + 0.9))
-    gs = GridSpec(1 + len(fam_names), 3, figure=fig, width_ratios=[1, 1, 0.42], wspace=0.22, hspace=0.32)
+    fig = plt.figure(figsize=(14.5, 3.3 * (1 + len(fam_names)) + 0.9))
+    gs = GridSpec(1 + len(fam_names), 3, figure=fig, width_ratios=[1, 1, 0.42], wspace=0.22, hspace=0.5)
     rows = ["BToM"] + fam_names
     upd = {}
     for r, rname in enumerate(rows):
@@ -189,12 +212,9 @@ def main():
                 kcol = f"{cfg['prefix']}_{key[score]}"
                 dci = diff_ci(mb, mw, kcol, args.n_boot, rng)
                 onset = sustained_onset(dci)
-                onsets[(rname, score)] = (onset, dci)
-                if onset is not None:
-                    ax.axvspan(onset, max(labels_x) + 1, color="#F1F1F1", zorder=0, lw=0)
-                    ax.axvline(onset, color="#555555", lw=1.0, zorder=1)
-                    ax.text(onset + 0.06, 0.97, f"{cfg['names'][key[score]]} diverges", transform=ax.get_xaxis_transform(),
-                            ha="left", va="top", fontsize=8.5, color="#333333", style="italic")
+                peak = dci["diff"].iloc[int(np.nanargmax(np.abs(dci["diff"].values)))]
+                bold, _ = jump_phases(mb, mw, kcol, np.sign(peak))
+                onsets[(rname, score)] = (onset, dci, bold)
                 for o in cfg["options"]:
                     col = f"{cfg['prefix']}_{o}"
                     color = cfg["colors"][o]
@@ -223,10 +243,13 @@ def main():
             ax.set_ylim(*cfg["ylim"])
             if score == "desire":
                 ax.set_yticks(range(1, 8))
-            if r == len(rows) - 1:
-                ax.set_xticklabels([labels_x[k] for k in labels_x], rotation=30, ha="right", fontsize=9)
-            else:
-                ax.set_xticklabels([])
+            ax.set_xticklabels([labels_x[k] for k in labels_x], rotation=30, ha="right", fontsize=9)
+            if r > 0:
+                for k, t in zip(labels_x, ax.get_xticklabels()):
+                    if k in onsets[(rname, score)][2]:
+                        t.set_fontweight("bold")
+                        t.set_color("#000000")
+                        t.set_fontsize(9.8)
             ax.set_ylabel({"desire": "Desire (1–7)", "belief": "Belief (probability)"}[score], fontsize=9.5)
             ax.grid(axis="y", color="#F0F0F0", lw=0.6)
             for s in ("top", "right"):
@@ -247,10 +270,11 @@ def main():
                  mlines.Line2D([], [], color="#444444", lw=1.9, ls=(0, (4, 1.6)), marker="o", ms=4.5, mfc="white",
                                label="Worse (dashed)"),
                  mlines.Line2D([], [], color="#777777", lw=1.4, ls=(0, (3, 2)), label="BToM (key option)"),
-                 mpatches.Patch(color="#999999", alpha=0.3, label="Better − Worse gap (key option)"),
-                 mpatches.Patch(color="#F1F1F1", ec="#555555", lw=0.8,
-                                label="Divergence onset: gap ≥ ½ of its max,\nsame sign, 95% CI excl. 0, to the end")]
-            ax.legend(handles=h, loc="center left", frameon=False, fontsize=9, borderaxespad=0)
+                 mpatches.Patch(color="#ACCB20", alpha=0.3, label="Better − Worse gap (key option)")]
+            ax.legend(handles=h, loc="center left", frameon=False, fontsize=9, borderaxespad=0,
+                      bbox_to_anchor=(0, 0.6))
+            ax.text(0, 0.12, "Bold phase label = where the Better − Worse\ngap widens the most (both phases if the\n"
+                    "jump spans their boundary)", transform=ax.transAxes, fontsize=8.2, va="top", color="#333333")
             continue
         for j, score in enumerate(DIMS):
             for tier, dx in (("better", -0.13), ("worse", 0.13)):
@@ -288,11 +312,12 @@ def main():
     pd.DataFrame(rec).to_csv(out_csv, index=False)
     print(pd.DataFrame(rec).round(2).to_string(index=False))
     drec = []
-    for (f, sc), (on, dci) in onsets.items():
+    for (f, sc), (on, dci, bold) in onsets.items():
         for ph, row in dci.iterrows():
             drec.append(dict(family=f, dimension=sc, key_option=key[sc], phase=labels_x.get(int(ph), ph),
                              better_minus_worse=row["diff"], ci_low=row["lo"], ci_high=row["hi"],
-                             onset=labels_x.get(int(on)) if on is not None else None))
+                             onset_halfmax=labels_x.get(int(on)) if on is not None else None,
+                             bold=" + ".join(labels_x[int(b)] for b in bold)))
     ddf = pd.DataFrame(drec)
     ddf.to_csv(os.path.splitext(args.out)[0] + "_divergence.csv", index=False)
     print(ddf.round(2).to_string(index=False))
