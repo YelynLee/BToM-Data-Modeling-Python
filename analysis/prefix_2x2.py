@@ -235,45 +235,60 @@ def main():
     ctab.to_csv(os.path.join(args.out_dir, "prefix_2x2_contrasts_table.csv"))
 
     plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary.png"))
+    plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary_with_update.png"), with_update=True)
     plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa.png"))
 
 
-def _dot_panel(ax, per_model, models, metric, title, ylim=None):
+def _dot_panel(ax, per_model, models, metric, ylim=None):
     fams = list(dict.fromkeys(f for _, f, _ in models))
     for i, f in enumerate(fams):
-        for tier, dx in (("better", -0.12), ("worse", 0.12)):
+        for tier, dx in (("better", -0.15), ("worse", 0.15)):
             lab = [m for m, ff, t in models if ff == f and t == tier][0]
             r = per_model[(per_model.model == lab) & (per_model.metric == metric)].iloc[0]
             c = C_BETTER if tier == "better" else C_WORSE
             ax.errorbar(i + dx, r.value, yerr=[[r.value - r.ci_low], [r.ci_high - r.value]], fmt="o", color=c,
-                        ms=7, capsize=3, lw=1.5, mec="white", mew=0.8)
-            ax.text(i + dx + 0.06, r.value, lab, fontsize=7.5, va="center", color="#444444")
+                        ms=10, capsize=4, lw=2, mec="white", mew=1.2, zorder=3)
+            ax.text(i + dx + (0.09 if tier == "worse" else -0.09), r.value, f"{r.value:.2f}", fontsize=9,
+                    va="center", ha="left" if tier == "worse" else "right", color="#333333")
     ax.set_xticks(range(len(fams)))
-    ax.set_xticklabels(fams)
-    ax.set_xlim(-0.5, len(fams) - 0.3)
+    ax.set_xticklabels(fams, fontsize=11)
+    ax.set_xlim(-0.55, len(fams) - 0.4)
     if ylim:
         ax.set_ylim(*ylim)
-    ax.set_title(title, fontsize=10)
-    ax.grid(axis="y", color="#EEEEEE", lw=0.6)
+    ax.tick_params(axis="y", labelsize=9.5)
+    ax.grid(axis="y", color="#EEEEEE", lw=0.7, zorder=0)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
 
 
-def plot_summary(per_model, models, out):
-    panels = [("final_human_r", "Final step vs Human"), ("level_r", "Step-wise vs BToM (level)"),
-              ("rm_r", "Within-trajectory vs BToM"), ("update_r", "Step-to-step update vs BToM")]
-    fig, axes = plt.subplots(2, 4, figsize=(15, 7), sharey="row")
-    for r, score in enumerate(("belief", "desire")):
-        for c, (k, t) in enumerate(panels):
-            _dot_panel(axes[r, c], per_model, models, f"{score}_{k}", f"{score.capitalize()}: {t}", (0, 1))
-        axes[r, 0].set_ylabel("Pearson r (95% CI)")
+SUMMARY_COLS = [("final_human_r", "Final step\nvs Human"), ("level_r", "Step-wise\nvs BToM"),
+                ("rm_r", "Within-trajectory\nvs BToM")]
+UPDATE_COL = ("update_r", "Step-to-step update\nvs BToM")
+
+
+def plot_summary(per_model, models, out, with_update=False):
+    cols = SUMMARY_COLS + ([UPDATE_COL] if with_update else [])
+    nc = len(cols)
+    fig, axes = plt.subplots(2, nc, figsize=(2.9 * nc + 1.0, 5.6), sharey=True, squeeze=False)
+    for r, score in enumerate(("desire", "belief")):          # desire 먼저 (논문 순서)
+        for c, (k, t) in enumerate(cols):
+            ax = axes[r, c]
+            _dot_panel(ax, per_model, models, f"{score}_{k}", (0, 1))
+            if r == 0:
+                ax.set_title(t, fontsize=12.5, fontweight="bold", pad=10)
+            if r == 0:
+                ax.set_xticklabels([])
+        axes[r, 0].set_ylabel("Pearson r (95% CI)", fontsize=10)
+        axes[r, 0].annotate(score.capitalize(), xy=(0, 0.5), xycoords="axes fraction", xytext=(-62, 0),
+                            textcoords="offset points", ha="right", va="center", rotation=90,
+                            fontsize=15, fontweight="bold")
     import matplotlib.lines as mlines
-    h = [mlines.Line2D([], [], color=C_BETTER, marker="o", ls="None", label="Better"),
-         mlines.Line2D([], [], color=C_WORSE, marker="o", ls="None", label="Worse")]
-    fig.legend(handles=h, loc="lower center", ncol=2, frameon=False)
-    fig.suptitle("Prefix-step 2x2: family x capability (scenario bootstrap, 73 scenarios)", fontsize=12)
-    fig.tight_layout(rect=(0, 0.04, 1, 0.96))
-    fig.savefig(out, dpi=200)
+    tl = {t: ", ".join(m for m, _, tt in models if tt == t) for t in ("better", "worse")}
+    h = [mlines.Line2D([], [], color=C_BETTER, marker="o", ms=9, ls="None", label=f"Better ({tl['better']})"),
+         mlines.Line2D([], [], color=C_WORSE, marker="o", ms=9, ls="None", label=f"Worse ({tl['worse']})")]
+    fig.legend(handles=h, loc="lower center", ncol=2, frameon=False, fontsize=10.5)
+    fig.tight_layout(rect=(0.03, 0.06, 1, 1), h_pad=1.2, w_pad=1.0)
+    fig.savefig(out, dpi=220)
     plt.close(fig)
     print(f"✅ saved: {out}")
 
@@ -283,7 +298,7 @@ def plot_vpa(per_model, models, out):
     labs = [m[0] for m in models]
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), sharey=True)
     w = 0.2
-    for ax, score in zip(axes, ("belief", "desire")):
+    for ax, score in zip(axes, ("desire", "belief")):          # desire 먼저 (논문 순서)
         for j, r in enumerate(REFS):
             for i, lab in enumerate(labs):
                 row = per_model[(per_model.model == lab) & (per_model.metric == f"{score}_vpa_unique_{r}")]
