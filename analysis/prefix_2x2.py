@@ -10,6 +10,10 @@ Hindsight 모델 없이 (교수님 결정) BToM과 대안 레퍼런스 3개(True
   update_r     : 연속 스텝 변화 Δ_t의 r (언제, 어느 방향으로 판단을 바꾸는지)
   vpa_unique_* : BToM / TrueBelief / NoCost / MotionHeuristic 고유 adjusted R² (0으로 자르지 않음), vpa_total
                  (원점수: 시나리오 간 차이 포함)
+  update_gain  : ΔLLM을 ΔBToM에 원점 회귀한 기울기 (1 = BToM만큼 갱신, <1 = 덜 갱신)
+  update_ratio : 평균 |ΔLLM| / 평균 |ΔBToM| (방향과 무관한 움직임의 총량)
+  bvpa_*       : 시나리오 수준 VPA (시나리오 x 옵션 평균, End-step VPA와 같은 결) — 본문용
+  amplification: (within gap) − (final-vs-human gap), 계열별 (contrasts 파일)
   wvpa_*       : 같은 VPA를 시나리오 내 평균을 뺀 값으로 (within-trajectory). TrueBelief belief는 시나리오 안에서
                  상수라 정의되지 않음(NaN). 단계별 변화를 무엇이 설명하는지를 보려면 이쪽
   mae          : |LLM − BToM| 평균 (시나리오 평균 후 평균)
@@ -111,6 +115,11 @@ class Data:
             dy = y[has_prev] - y[self.prev[has_prev]]
             db = b[has_prev] - b[self.prev[has_prev]]
             out[f"{score}_update_r"] = self._wr(dy.ravel(), db.ravel(), W[has_prev].ravel())
+            # update 크기: gain = ΔLLM을 ΔBToM에 원점 회귀한 기울기 (방향이 맞는 만큼의 크기, 1 = BToM만큼),
+            #              ratio = 평균 |ΔLLM| / 평균 |ΔBToM| (방향과 무관한 움직임의 총량)
+            wu = W[has_prev].ravel()
+            out[f"{score}_update_gain"] = np.sum(wu * dy.ravel() * db.ravel()) / np.sum(wu * db.ravel() ** 2)
+            out[f"{score}_update_ratio"] = np.sum(wu * np.abs(dy).ravel()) / np.sum(wu * np.abs(db).ravel())
             err = np.abs(y - b).mean(axis=1)
             e_sc = np.bincount(self.sidx, weights=err, minlength=self.n_s) / np.bincount(self.sidx, minlength=self.n_s)
             out[f"{score}_mae"] = np.average(e_sc, weights=sw) if sw.sum() > 0 else np.nan
@@ -144,6 +153,22 @@ class Data:
                 out[f"{score}_wvpa_unique_{r}"] = np.nan
             for i, r in enumerate(names):
                 out[f"{score}_wvpa_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
+            # VPA (시나리오 수준 = 시나리오 x 옵션 평균, End-step VPA와 같은 결). 시나리오 가중치 = 리샘플 횟수
+            cnt = np.bincount(self.sidx, minlength=self.n_s)
+            def smean(v):
+                return np.bincount(self.sidx, weights=v, minlength=self.n_s) / np.maximum(cnt, 1)
+            srep = np.repeat(np.arange(self.n_s), sw.astype(int))
+            yb = np.concatenate([smean(agg[:, k])[srep] for k in range(sl.start, sl.stop)])
+            Xb = np.column_stack([np.concatenate([smean(self.refs[r][:, k])[srep] for k in range(sl.start, sl.stop)])
+                                  for r in REFS])
+            keep = Xb.std(axis=0) > 1e-9
+            names = [r for r, k in zip(REFS, keep) if k]
+            yz = (yb - yb.mean()) / yb.std()
+            Xz = (Xb[:, keep] - Xb[:, keep].mean(axis=0)) / Xb[:, keep].std(axis=0)
+            full = _adj_r2(yz, Xz)
+            out[f"{score}_bvpa_total"] = full
+            for i, r in enumerate(names):
+                out[f"{score}_bvpa_unique_{r}"] = full - _adj_r2(yz, np.delete(Xz, i, axis=1))
             # 마지막 스텝 vs 사람 / BToM End-step
             fl = agg[self.last][:, sl]
             Ws = np.repeat(sw[:, None].astype(float), 3, axis=1).ravel()
@@ -171,6 +196,12 @@ def contrasts(m, models):
             out[(k, f"family_{a}-{b}")] = (np.mean([m[fam[a][t]][k] for t in ("better", "worse")])
                                            - np.mean([m[fam[b][t]][k] for t in ("better", "worse")]))
             out[(k, "interaction")] = gaps[a] - gaps[b]
+    # 차이의 증폭: (Within-trajectory gap) − (Final vs Human gap). 양수 = 궤적에서 Better/Worse 차이가 더 큼
+    for score in ("desire", "belief"):
+        for f in fams:
+            g = {k: m[fam[f]["better"]][f"{score}_{k}"] - m[fam[f]["worse"]][f"{score}_{k}"]
+                 for k in ("rm_r", "final_human_r")}
+            out[(f"{score}_amplification", f"gap_{f}")] = g["rm_r"] - g["final_human_r"]
     return out
 
 
@@ -248,17 +279,19 @@ def main():
     tab = tab.loc[show, [m[0] for m in models]]
     print(tab.to_string())
     ctab = con.assign(s=con.apply(lambda r: fmt(r) + ("*" if r.p_boot < 0.05 else ""), axis=1)).pivot(
-        index="metric", columns="contrast", values="s").loc[show]
+        index="metric", columns="contrast", values="s").loc[show + ["desire_amplification", "belief_amplification"]]
     print(ctab.to_string())
     tab.to_csv(os.path.join(args.out_dir, "prefix_2x2_metrics_table.csv"))
     ctab.to_csv(os.path.join(args.out_dir, "prefix_2x2_contrasts_table.csv"))
 
-    plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary.png"))
+    plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary.png"), con=con)
     plot_summary(per_model, models, os.path.join(args.out_dir, "prefix_2x2_summary_with_update.png"), with_update=True)
     plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa.png"), "vpa",
              "Prefix-step VPA, raw values")
     plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa_within.png"), "wvpa",
              "Prefix-step VPA, within-trajectory (scenario means removed)")
+    plot_vpa(per_model, models, os.path.join(args.out_dir, "prefix_2x2_vpa_scenario.png"), "bvpa",
+             "Prefix-step VPA, scenario-level response patterns (scenario × option means)")
 
 
 def _dot_panel(ax, per_model, models, metric, ylim=None):
@@ -287,18 +320,64 @@ SUMMARY_COLS = [("final_human_r", "Final step\nvs Human"), ("rm_r", "Within-traj
 UPDATE_COL = ("update_r", "Step-to-step update\nvs BToM")
 
 
-def plot_summary(per_model, models, out, with_update=False):
+FAM_STYLE = {0: dict(color="#2F4B7C", marker="o"), 1: dict(color="#B5832F", marker="D")}
+
+
+def _gap_panel(ax, con, models, score, cols):
+    """계열별 Better − Worse 차이 (95% CI)를 지표 순서대로 잇는 선. 증폭(within − final) 유의하면 별표."""
+    fams = list(dict.fromkeys(f for _, f, _ in models))
+    xs = np.arange(len(cols))
+    labels = []
+    for i, f in enumerate(fams):
+        st = FAM_STYLE[i]
+        vals, los, his = [], [], []
+        for k, _ in cols:
+            r = con[(con.metric == f"{score}_{k}") & (con.contrast == f"gap_{f}")].iloc[0]
+            vals.append(r.value); los.append(r.ci_low); his.append(r.ci_high)
+        dx = -0.06 if i == 0 else 0.06
+        ax.plot(xs + dx, vals, color=st["color"], lw=2.2, zorder=2)
+        ax.errorbar(xs + dx, vals, yerr=[np.subtract(vals, los), np.subtract(his, vals)], fmt=st["marker"],
+                    color=st["color"], ms=8, capsize=3, lw=1.6, mec="white", mew=1, zorder=3)
+        a = con[(con.metric == f"{score}_amplification") & (con.contrast == f"gap_{f}")].iloc[0]
+        sig = "*" if a.p_boot < 0.05 else ""
+        labels.append([vals[-1], f"{f}  {a.value:+.2f}{sig}", st["color"]])
+    labels.sort(key=lambda t: t[0])
+    for j in range(1, len(labels)):                     # 겹치지 않게 최소 0.07 간격
+        labels[j][0] = max(labels[j][0], labels[j - 1][0] + 0.07)
+    for y, txt, c in labels:
+        ax.text(xs[-1] + 0.14, y, txt, fontsize=9, va="center", color=c, fontweight="bold")
+    ax.axhline(0, color="#333333", lw=0.8)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([t.replace("\n", " ").replace(" vs ", "\nvs ") for _, t in cols], fontsize=9)
+    ax.set_xlim(-0.35, len(cols) - 1 + 0.95)
+    ax.set_ylim(-0.1, 0.65)
+    ax.set_ylabel("Better − Worse (Δr, 95% CI)", fontsize=9.5)
+    ax.tick_params(axis="y", labelsize=9)
+    ax.grid(axis="y", color="#EEEEEE", lw=0.7, zorder=0)
+    for s_ in ("top", "right"):
+        ax.spines[s_].set_visible(False)
+
+
+def plot_summary(per_model, models, out, with_update=False, con=None):
     cols = SUMMARY_COLS + ([UPDATE_COL] if with_update else [])
     nc = len(cols)
-    fig, axes = plt.subplots(2, nc, figsize=(3.1 * nc + 1.0, 5.6), sharey=True, squeeze=False)
+    with_gap = con is not None and not with_update
+    fig, axes = plt.subplots(2, nc + int(with_gap), figsize=(3.1 * nc + 1.0 + 3.4 * int(with_gap), 5.8),
+                             squeeze=False, gridspec_kw={"width_ratios": [1] * nc + [1.15] * int(with_gap)})
     for r, score in enumerate(("desire", "belief")):          # desire 먼저 (논문 순서)
         for c, (k, t) in enumerate(cols):
             ax = axes[r, c]
             _dot_panel(ax, per_model, models, f"{score}_{k}", (0, 1))
+            if c > 0:
+                ax.set_yticklabels([])
             if r == 0:
                 ax.set_title(t, fontsize=12.5, fontweight="bold", pad=10)
-            if r == 0:
                 ax.set_xticklabels([])
+        if with_gap:
+            _gap_panel(axes[r, nc], con, models, score, cols)
+            if r == 0:
+                axes[r, nc].set_title("Better − Worse gap", fontsize=12.5, fontweight="bold", pad=10)
+                axes[r, nc].set_xticklabels([])
         axes[r, 0].set_ylabel("Pearson r (95% CI)", fontsize=10)
         axes[r, 0].annotate(score.capitalize(), xy=(0, 0.5), xycoords="axes fraction", xytext=(-62, 0),
                             textcoords="offset points", ha="right", va="center", rotation=90,
@@ -307,8 +386,12 @@ def plot_summary(per_model, models, out, with_update=False):
     tl = {t: ", ".join(m for m, _, tt in models if tt == t) for t in ("better", "worse")}
     h = [mlines.Line2D([], [], color=C_BETTER, marker="o", ms=9, ls="None", label=f"Better ({tl['better']})"),
          mlines.Line2D([], [], color=C_WORSE, marker="o", ms=9, ls="None", label=f"Worse ({tl['worse']})")]
-    fig.legend(handles=h, loc="lower center", ncol=2, frameon=False, fontsize=10.5)
-    fig.tight_layout(rect=(0.03, 0.06, 1, 1), h_pad=1.2, w_pad=1.0)
+    fig.legend(handles=h, loc="lower center", ncol=2, frameon=False, fontsize=10,
+               bbox_to_anchor=(0.36 if with_gap else 0.5, 0))
+    if with_gap:
+        fig.text(0.985, 0.018, "Gap panel label: (within gap) − (final gap), * = 95% CI excl. 0", ha="right",
+                 va="bottom", fontsize=9, color="#444444")
+    fig.tight_layout(rect=(0.03, 0.06, 1, 1), h_pad=1.2, w_pad=1.2)
     fig.savefig(out, dpi=220)
     plt.close(fig)
     print(f"✅ saved: {out}")

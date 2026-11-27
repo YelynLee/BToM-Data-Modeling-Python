@@ -12,9 +12,11 @@
     (a) 최대 차이와 같은 부호, (b) 최대 차이의 절반 이상, (c) 시나리오 bootstrap 95% CI가 0을 포함하지 않음
     을 모두 만족하는 첫 phase (Start 제외). 시나리오 간 변동이 작아 CI만으로는 아주 작은 차이도 유의해지므로
     효과 크기 조건(a, b)을 함께 씀. (기록용, _divergence.csv의 onset 열)
-  - 그림의 굵은 x축 레이블 = 주요 분기 구간: 핵심 옵션의 Better − Worse 차이가 가장 크게 벌어지는 곳.
-    phase를 스텝 위치로 앞/뒤 절반으로 나눈 소구간 사이에서 차이 증가가 가장 큰 곳을 찾아,
-    두 phase에 걸치면(앞 phase 끝 -> 다음 phase 시작) 두 phase 모두, 한 phase 안이면 그 phase만 굵게
+  - 그림의 굵은 x축 레이블 = 주요 분기 구간 (scenario_max_widening): 시나리오마다 스텝 단위 갭 변화량이
+    처음으로 최대가 되는 스텝을 찾고, 시나리오의 절반 이상이 같은 곳(동률 없음)일 때 그 구간을 굵게.
+    직전 스텝과 다른 phase면 경계이므로 두 phase 모두 굵게
+  - 기록용 (_divergence_summary.csv): half-max onset, 평균 곡선의 최대 증가 전환, relative closure
+    R = (Better − Worse)/(BToM − Worse), BToM 최대 갱신 스텝과의 일치
 update 패널
   - Δ_t = 판단_t − 판단_{t−1} (같은 시나리오 안)과 BToM의 Δ의 Pearson r (옵션 3개 pooled), 시나리오 bootstrap 95% CI
   - prefix_2x2.py의 update_r과 같은 정의 (여기서는 이 그룹 시나리오만)
@@ -102,6 +104,59 @@ def jump_phases(mb, mw, col, peak_sign):
     j = int(np.nanargmax(jumps))
     (pa, _), (pb, _) = keys[j], keys[j + 1]
     return ([pa, pb] if pa != pb else [pb]), g
+
+
+def scenario_max_widening(mb, mw, col, sign, labels_x):
+    """교수님 안 (2): 시나리오마다 스텝 단위 갭 g_t = sign·(Better_t − Worse_t)의 변화량 Δg_t = g_t − g_{t−1}이
+    처음으로 최대가 되는 스텝 t* (동률이면 앞쪽). t*−1과 t*가 다른 phase면 '경계'(두 phase), 같으면 그 phase.
+    같은 시나리오에서 BToM 자체가 가장 크게 바뀌는 스텝(|ΔBToM| 최대)도 기록해 일치 여부를 봄.
+    굵게 표시: 최빈 위치가 시나리오의 절반 이상이고 동률이 없을 때만 (localized). 아니면 표시하지 않음."""
+    a = mb.set_index(["scenario_id", "time_step"])
+    b = mw.set_index(["scenario_id", "time_step"])
+    rec = []
+    for sid in sorted(a.index.get_level_values(0).unique()):
+        A, B = a.loc[sid].sort_index(), b.loc[sid].sort_index()
+        steps = A.index.intersection(B.index)
+        A, B = A.loc[steps], B.loc[steps]
+        g = sign * (A[col] - B[col]).to_numpy()
+        dg = np.diff(g)
+        if len(dg) == 0:
+            continue
+        j = int(np.argmax(dg))                     # 첫 번째 최대
+        ph = A["phase_idx"].to_numpy()
+        p0, p1 = int(ph[j]), int(ph[j + 1])
+        cat = labels_x[p1] if p0 == p1 else f"{labels_x[p0]} → {labels_x[p1]}"
+        db = np.abs(np.diff(A[f"btom__{col}"].to_numpy()))
+        jb = int(np.argmax(db))
+        rec.append(dict(scenario_id=sid, step=int(steps[j + 1]), widening=dg[j], category=cat,
+                        phases=(p0, p1) if p0 != p1 else (p1,),
+                        btom_step=int(steps[jb + 1]), same_as_btom=abs(jb - j) <= 0,
+                        within1_of_btom=abs(jb - j) <= 1))
+    df = pd.DataFrame(rec)
+    counts = df["category"].value_counts()
+    mode = counts.index[0]
+    tie = len(counts) > 1 and counts.iloc[1] == counts.iloc[0]
+    localized = (counts.iloc[0] / len(df) >= 0.5) and not tie     # 시나리오 절반 이상이 같은 곳 + 동률 없음
+    bold = list(df.loc[df["category"] == mode, "phases"].iloc[0]) if localized else []
+    summ = dict(mode=mode + (" (tie)" if tie else ""), mode_share=f"{counts.iloc[0]}/{len(df)}", n=len(df),
+                localized=localized,
+                btom_match=f"{int(df['same_as_btom'].sum())}/{len(df)}",
+                btom_match_pm1=f"{int(df['within1_of_btom'].sum())}/{len(df)}",
+                all_categories="; ".join(f"{k} {v}" for k, v in counts.items()))
+    return bold, summ, df
+
+
+def relative_closure(mb, mw, col, sign, floor=0.1):
+    """교수님 안 (1): phase별 R = (Better − Worse) / (BToM − Worse) (시나리오 평균의 비).
+    |BToM − Worse|가 그 옵션 BToM 범위의 floor배보다 작으면 분모가 불안정하므로 NaN."""
+    B = per_scenario_phase(mb, col).mean(axis=0)
+    W = per_scenario_phase(mw, col).mean(axis=0)
+    T = per_scenario_phase(mb, f"btom__{col}").mean(axis=0)
+    rng_ = T.max() - T.min()
+    den = T - W
+    R = (B - W) / den
+    R[np.abs(den) < floor * max(rng_, 1e-9)] = np.nan
+    return R
 
 
 def update_r(m, score, n_boot, rng):
@@ -212,9 +267,17 @@ def main():
                 kcol = f"{cfg['prefix']}_{key[score]}"
                 dci = diff_ci(mb, mw, kcol, args.n_boot, rng)
                 onset = sustained_onset(dci)
-                peak = dci["diff"].iloc[int(np.nanargmax(np.abs(dci["diff"].values)))]
-                bold, _ = jump_phases(mb, mw, kcol, np.sign(peak))
-                onsets[(rname, score)] = (onset, dci, bold)
+                fin = dci["diff"].iloc[-1]
+                sign = np.sign(fin) if fin != 0 else 1.0
+                bold, summ, sdf = scenario_max_widening(mb, mw, kcol, sign, labels_x)
+                Rcl = relative_closure(mb, mw, kcol, sign)
+                # 비교용: 평균 곡선(phase 평균)에서 갭 증가가 가장 큰 phase 전환
+                gm = sign * dci["diff"]
+                jm = int(np.nanargmax(np.diff(gm.values)))
+                summ.update(halfmax_onset=labels_x.get(int(onset)) if onset is not None else None,
+                            meancurve_max_widening=f"{labels_x[int(gm.index[jm])]} → {labels_x[int(gm.index[jm + 1])]}",
+                            closure_R=" ".join(f"{labels_x[int(k)]}:{v:.2f}" for k, v in Rcl.items() if not np.isnan(v)))
+                onsets[(rname, score)] = (onset, dci, bold, summ, sdf, Rcl)
                 for o in cfg["options"]:
                     col = f"{cfg['prefix']}_{o}"
                     color = cfg["colors"][o]
@@ -273,8 +336,9 @@ def main():
                  mpatches.Patch(color="#ACCB20", alpha=0.3, label="Better − Worse gap (key option)")]
             ax.legend(handles=h, loc="center left", frameon=False, fontsize=9, borderaxespad=0,
                       bbox_to_anchor=(0, 0.6))
-            ax.text(0, 0.12, "Bold phase label = where the Better − Worse\ngap widens the most (both phases if the\n"
-                    "jump spans their boundary)", transform=ax.transAxes, fontsize=8.2, va="top", color="#333333")
+            ax.text(0, 0.12, "Bold phase label = where the Better − Worse\ngap first widens the most (step-level, modal\n"
+                    "in ≥ half of scenarios; both phases if the\njump spans their boundary). No bold = no\nconsistent divergence point", transform=ax.transAxes,
+                    fontsize=8.2, va="top", color="#333333")
             continue
         for j, score in enumerate(DIMS):
             for tier, dx in (("better", -0.13), ("worse", 0.13)):
@@ -312,15 +376,21 @@ def main():
     pd.DataFrame(rec).to_csv(out_csv, index=False)
     print(pd.DataFrame(rec).round(2).to_string(index=False))
     drec = []
-    for (f, sc), (on, dci, bold) in onsets.items():
+    srec, scen_rec = [], []
+    for (f, sc), (on, dci, bold, summ, sdf, Rcl) in onsets.items():
         for ph, row in dci.iterrows():
             drec.append(dict(family=f, dimension=sc, key_option=key[sc], phase=labels_x.get(int(ph), ph),
                              better_minus_worse=row["diff"], ci_low=row["lo"], ci_high=row["hi"],
-                             onset_halfmax=labels_x.get(int(on)) if on is not None else None,
-                             bold=" + ".join(labels_x[int(b)] for b in bold)))
-    ddf = pd.DataFrame(drec)
-    ddf.to_csv(os.path.splitext(args.out)[0] + "_divergence.csv", index=False)
-    print(ddf.round(2).to_string(index=False))
+                             relative_closure=Rcl.get(ph, np.nan)))
+        srec.append(dict(family=f, dimension=sc, key_option=key[sc],
+                         bold=" + ".join(labels_x[int(b)] for b in bold), **summ))
+        scen_rec.append(sdf.assign(family=f, dimension=sc).drop(columns=["phases"]))
+    base = os.path.splitext(args.out)[0]
+    pd.DataFrame(drec).to_csv(base + "_divergence.csv", index=False)
+    pd.DataFrame(srec).to_csv(base + "_divergence_summary.csv", index=False)
+    pd.concat(scen_rec).to_csv(base + "_divergence_by_scenario.csv", index=False)
+    pd.set_option("display.width", 250)
+    print(pd.DataFrame(srec).to_string(index=False))
 
 
 if __name__ == "__main__":
