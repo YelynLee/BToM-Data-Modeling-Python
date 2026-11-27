@@ -110,7 +110,8 @@ def scenario_max_widening(mb, mw, col, sign, labels_x):
     """교수님 안 (2): 시나리오마다 스텝 단위 갭 g_t = sign·(Better_t − Worse_t)의 변화량 Δg_t = g_t − g_{t−1}이
     처음으로 최대가 되는 스텝 t* (동률이면 앞쪽). t*−1과 t*가 다른 phase면 '경계'(두 phase), 같으면 그 phase.
     같은 시나리오에서 BToM 자체가 가장 크게 바뀌는 스텝(|ΔBToM| 최대)도 기록해 일치 여부를 봄.
-    굵게 표시: 최빈 위치가 시나리오의 절반 이상이고 동률이 없을 때만 (localized). 아니면 표시하지 않음."""
+    굵게 표시: 최빈 위치(동률이면 모두)를 굵게 하고, 그 위치에 비율(k/n)을 적음.
+    localized(절반 이상, 동률 없음)는 기록용."""
     a = mb.set_index(["scenario_id", "time_step"])
     b = mw.set_index(["scenario_id", "time_step"])
     rec = []
@@ -136,13 +137,16 @@ def scenario_max_widening(mb, mw, col, sign, labels_x):
     counts = df["category"].value_counts()
     mode = counts.index[0]
     tie = len(counts) > 1 and counts.iloc[1] == counts.iloc[0]
-    localized = (counts.iloc[0] / len(df) >= 0.5) and not tie     # 시나리오 절반 이상이 같은 곳 + 동률 없음
-    bold = list(df.loc[df["category"] == mode, "phases"].iloc[0]) if localized else []
+    localized = (counts.iloc[0] / len(df) >= 0.5) and not tie     # 기록용
+    top = [c for c, v in counts.items() if v == counts.iloc[0]]  # 최빈 위치 (동률이면 모두)
+    marks = [(df.loc[df["category"] == c, "phases"].iloc[0], int(counts[c]), len(df)) for c in top]
+    bold = sorted({p for ph_, _, _ in marks for p in ph_})
     summ = dict(mode=mode + (" (tie)" if tie else ""), mode_share=f"{counts.iloc[0]}/{len(df)}", n=len(df),
                 localized=localized,
                 btom_match=f"{int(df['same_as_btom'].sum())}/{len(df)}",
                 btom_match_pm1=f"{int(df['within1_of_btom'].sum())}/{len(df)}",
                 all_categories="; ".join(f"{k} {v}" for k, v in counts.items()))
+    summ["marks"] = marks
     return bold, summ, df
 
 
@@ -308,6 +312,11 @@ def main():
                 ax.set_yticks(range(1, 8))
             ax.set_xticklabels([labels_x[k] for k in labels_x], rotation=30, ha="right", fontsize=9)
             if r > 0:
+                for ph_, k_, n_ in onsets[(rname, score)][3]["marks"]:
+                    xm = ph_[1] if len(ph_) == 2 else ph_[0] + 0.5      # 경계면 경계 위치, 아니면 phase 중앙
+                    ax.annotate(f"{k_}/{n_}", xy=(xm, 0), xycoords=("data", "axes fraction"), xytext=(0, 3),
+                                textcoords="offset points", ha="center", va="bottom", fontsize=8.5,
+                                color="#333333", fontweight="bold")
                 for k, t in zip(labels_x, ax.get_xticklabels()):
                     if k in onsets[(rname, score)][2]:
                         t.set_fontweight("bold")
@@ -336,8 +345,8 @@ def main():
                  mpatches.Patch(color="#ACCB20", alpha=0.3, label="Better − Worse gap (key option)")]
             ax.legend(handles=h, loc="center left", frameon=False, fontsize=9, borderaxespad=0,
                       bbox_to_anchor=(0, 0.6))
-            ax.text(0, 0.12, "Bold phase label = where the Better − Worse\ngap first widens the most (step-level, modal\n"
-                    "in ≥ half of scenarios; both phases if the\njump spans their boundary). No bold = no\nconsistent divergence point", transform=ax.transAxes,
+            ax.text(0, 0.12, "Bold phase label = where the Better − Worse\ngap first widens the most (step-level; modal\n"
+                    "location across scenarios, share shown\nabove the axis; both phases if the jump\nspans their boundary)", transform=ax.transAxes,
                     fontsize=8.2, va="top", color="#333333")
             continue
         for j, score in enumerate(DIMS):
